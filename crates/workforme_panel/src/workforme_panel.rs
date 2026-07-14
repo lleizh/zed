@@ -118,6 +118,14 @@ enum StageStatus {
     Done,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct DynStage {
+    key: String,
+    label: String,
+    status: StageStatus,
+    session_id: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct WorkformeTask {
     id: String,
@@ -131,9 +139,14 @@ pub struct WorkformeTask {
     worktree: Option<String>,
     stages: HashMap<Stage, StageStatus>,
     sessions: HashMap<Stage, String>,
+    dynamic_stages: Vec<DynStage>,
 }
 
 impl WorkformeTask {
+    fn is_review(&self) -> bool {
+        self.task_type.as_deref() == Some("review")
+    }
+
     fn current_stage(&self) -> &Stage {
         for stage in Stage::all() {
             match self.stages.get(stage) {
@@ -145,6 +158,10 @@ impl WorkformeTask {
     }
 
     fn latest_session_id(&self) -> Option<&str> {
+        if self.is_review() {
+            return self.dynamic_stages.iter().rev()
+                .find_map(|s| s.session_id.as_deref());
+        }
         for stage in Stage::all().iter().rev() {
             if let Some(id) = self.sessions.get(stage) {
                 return Some(id.as_str());
@@ -152,6 +169,7 @@ impl WorkformeTask {
         }
         None
     }
+
 }
 
 pub struct WorkformePanel {
@@ -538,28 +556,49 @@ fn parse_task_dir(task_dir: &Path) -> Option<WorkformeTask> {
 
     let mut stages = HashMap::new();
     let mut sessions = HashMap::new();
+    let mut dynamic_stages = Vec::new();
+
+    let is_review = task_type.as_deref() == Some("review");
 
     if let Some(stages_obj) = state_value.get("stages").and_then(|v| v.as_object()) {
-        for stage in Stage::all() {
-            let stage_key = stage.state_key();
-            if let Some(stage_val) = stages_obj.get(stage_key).and_then(|v| v.as_object()) {
-                let status_str = stage_val.get("status").and_then(|v| v.as_str()).unwrap_or("not_started");
-                let session_id = stage_val.get("session_id").and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                    .map(|s| s.to_string());
-
-                if let Some(ref sid) = session_id {
-                    sessions.insert(stage.clone(), sid.clone());
+        if is_review {
+            for (key, val) in stages_obj {
+                if let Some(stage_val) = val.as_object() {
+                    let status_str = stage_val.get("status").and_then(|v| v.as_str()).unwrap_or("not_started");
+                    let session_id = stage_val.get("session_id").and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string());
+                    let status = match status_str {
+                        "done" => StageStatus::Done,
+                        "running" => StageStatus::InProgress(session_id.clone()),
+                        _ => StageStatus::NotStarted,
+                    };
+                    let label = key[..1].to_uppercase() + &key[1..];
+                    dynamic_stages.push(DynStage { key: key.clone(), label, status, session_id });
                 }
+            }
+        } else {
+            for stage in Stage::all() {
+                let stage_key = stage.state_key();
+                if let Some(stage_val) = stages_obj.get(stage_key).and_then(|v| v.as_object()) {
+                    let status_str = stage_val.get("status").and_then(|v| v.as_str()).unwrap_or("not_started");
+                    let session_id = stage_val.get("session_id").and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string());
 
-                let status = match status_str {
-                    "done" => StageStatus::Done,
-                    "running" => StageStatus::InProgress(session_id),
-                    _ => StageStatus::NotStarted,
-                };
-                stages.insert(stage.clone(), status);
-            } else {
-                stages.insert(stage.clone(), StageStatus::NotStarted);
+                    if let Some(ref sid) = session_id {
+                        sessions.insert(stage.clone(), sid.clone());
+                    }
+
+                    let status = match status_str {
+                        "done" => StageStatus::Done,
+                        "running" => StageStatus::InProgress(session_id),
+                        _ => StageStatus::NotStarted,
+                    };
+                    stages.insert(stage.clone(), status);
+                } else {
+                    stages.insert(stage.clone(), StageStatus::NotStarted);
+                }
             }
         }
     }
@@ -576,6 +615,7 @@ fn parse_task_dir(task_dir: &Path) -> Option<WorkformeTask> {
         worktree,
         stages,
         sessions,
+        dynamic_stages,
     })
 }
 
@@ -689,7 +729,12 @@ fn render_task_row(
                             .color(ui::Color::Muted),
                     )
                 })
-                .child(render_stage_badges(task, current_stage, cx)),
+                .when(task.is_review(), |el| {
+                    el.child(render_dynamic_badges(&task.dynamic_stages, cx))
+                })
+                .when(!task.is_review(), |el| {
+                    el.child(render_stage_badges(task, current_stage, cx))
+                }),
         )
 }
 
@@ -734,9 +779,38 @@ fn render_stage_badges(task: &WorkformeTask, current_stage: &Stage, cx: &App) ->
     }))
 }
 
+fn render_dynamic_badges(stages: &[DynStage], cx: &App) -> impl IntoElement {
+    h_flex().gap_0p5().children(stages.iter().map(|stage| {
+        let (color, text_color) = match &stage.status {
+            StageStatus::Done => (
+                cx.theme().colors().ghost_element_selected,
+                ui::Color::Success,
+            ),
+            StageStatus::InProgress(_) => (
+                cx.theme().colors().ghost_element_hover,
+                ui::Color::Warning,
+            ),
+            StageStatus::NotStarted => (
+                cx.theme().colors().ghost_element_background,
+                ui::Color::Muted,
+            ),
+        };
+
+        div()
+            .px_1()
+            .rounded_sm()
+            .bg(color)
+            .child(
+                Label::new(stage.label.clone())
+                    .size(ui::LabelSize::XSmall)
+                    .color(text_color),
+            )
+    }))
+}
+
 impl PartialEq for WorkformeTask {
     fn eq(&self, other: &Self) -> bool {
-        self.id == other.id && self.stages == other.stages
+        self.id == other.id && self.stages == other.stages && self.dynamic_stages == other.dynamic_stages
     }
 }
 
@@ -1034,7 +1108,110 @@ impl Render for WorkformeTaskView {
             )
             // Pipeline visualization
             .child(div().h(px(1.)).bg(cx.theme().colors().border))
-            .child(
+            .when(self.task.is_review(), |el| {
+                let entity = entity.clone();
+                el.child(
+                    v_flex()
+                        .py_2()
+                        .pl_2()
+                        .children(self.task.dynamic_stages.iter().enumerate().map(|(i, dyn_stage)| {
+                            let (indicator, color) = match &dyn_stage.status {
+                                StageStatus::Done => ("●", ui::Color::Success),
+                                StageStatus::InProgress(_) => ("◐", ui::Color::Warning),
+                                StageStatus::NotStarted => ("○", ui::Color::Muted),
+                            };
+                            let status_label = match &dyn_stage.status {
+                                StageStatus::Done => "done",
+                                StageStatus::InProgress(_) => "running",
+                                StageStatus::NotStarted => "—",
+                            };
+                            let mut row = h_flex()
+                                .gap_2()
+                                .py_0p5()
+                                .items_center()
+                                .child(Label::new(indicator).size(ui::LabelSize::Default).color(color))
+                                .child(
+                                    div().w(px(80.)).child(
+                                        Label::new(dyn_stage.label.clone()).size(ui::LabelSize::Small).color(color)
+                                    )
+                                )
+                                .child(
+                                    div().w(px(60.)).child(
+                                        Label::new(status_label).size(ui::LabelSize::XSmall).color(ui::Color::Muted)
+                                    )
+                                );
+                            if let Some(ref sid) = dyn_stage.session_id {
+                                let entity_for_attach = entity.clone();
+                                let sid = sid.clone();
+                                let is_running = matches!(dyn_stage.status, StageStatus::InProgress(_));
+                                let btn_label = if is_running { "⏎ Attach" } else { "⏎ Resume" };
+                                let btn_color = if is_running { ui::Color::Warning } else { ui::Color::Default };
+                                row = row.child(
+                                    div()
+                                        .id(gpui::ElementId::NamedInteger("wfm-dyn-attach".into(), i as u64))
+                                        .px_2()
+                                        .py_0p5()
+                                        .rounded_sm()
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(cx.theme().colors().ghost_element_hover))
+                                        .child(Label::new(btn_label).size(ui::LabelSize::XSmall).color(btn_color))
+                                        .on_click(move |_event, window, cx| {
+                                            if let Some(view) = entity_for_attach.upgrade() {
+                                                let short_id = sid[..8.min(sid.len())].to_string();
+                                                view.update(cx, |view, cx| {
+                                                    view.open_session(&short_id, window, cx);
+                                                });
+                                            }
+                                        }),
+                                );
+                            }
+                            // View button for output file ({key}.md or {key}-*.md)
+                            let work = self.work_dir();
+                            let output_path = {
+                                let p = work.join(format!("{}.md", dyn_stage.key));
+                                if p.exists() {
+                                    Some(p)
+                                } else {
+                                    std::fs::read_dir(&work).ok()
+                                        .and_then(|entries| entries
+                                            .flatten()
+                                            .map(|e| e.path())
+                                            .find(|p| {
+                                                p.file_name()
+                                                    .and_then(|n| n.to_str())
+                                                    .map_or(false, |n| n.starts_with(&dyn_stage.key) && n.ends_with(".md"))
+                                            }))
+                                }
+                            };
+                            if let Some(output_path) = output_path {
+                                let entity_for_view = entity.clone();
+                                row = row.child(
+                                    div()
+                                        .id(gpui::ElementId::NamedInteger("wfm-dyn-view".into(), i as u64))
+                                        .px_2()
+                                        .py_0p5()
+                                        .rounded_sm()
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(cx.theme().colors().ghost_element_hover))
+                                        .child(Label::new("View").size(ui::LabelSize::XSmall).color(ui::Color::Default))
+                                        .on_click(move |_event, window, cx| {
+                                            if let Some(view) = entity_for_view.upgrade() {
+                                                view.update(cx, |view, cx| {
+                                                    if let Some(ws) = view.workspace.upgrade() {
+                                                        ws.update(cx, |ws, cx| {
+                                                            ws.open_abs_path(output_path.clone(), workspace::OpenOptions::default(), window, cx).detach();
+                                                        });
+                                                    }
+                                                });
+                                            }
+                                        }),
+                                );
+                            }
+                            row.into_any_element()
+                        })),
+                )
+            })
+            .when(!self.task.is_review(), |el| el.child(
                 v_flex()
                     .py_2()
                     .pl_2()
@@ -1190,7 +1367,7 @@ impl Render for WorkformeTaskView {
 
                         connector.into_iter().chain(std::iter::once(row))
                     })),
-            )
+            ))
             // Divider
             .child(div().h(px(1.)).bg(cx.theme().colors().border))
             // Quick actions
