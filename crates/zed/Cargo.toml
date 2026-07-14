@@ -1,12 +1,12 @@
 [package]
 description = "The fast, collaborative code editor."
 edition.workspace = true
-name = "zed"
+name = "workforme"
 version = "1.12.0"
 publish.workspace = true
 license = "GPL-3.0-or-later"
 authors = ["Zed Team <hi@zed.dev>"]
-default-run = "zed"
+default-run = "workforme"
 
 [lints]
 workspace = true
@@ -54,7 +54,7 @@ visual-tests = [
 ]
 
 [[bin]]
-name = "zed"
+name = "workforme"
 path = "src/main.rs"
 
 [[bin]]
@@ -199,6 +199,7 @@ tasks_ui.workspace = true
 telemetry.workspace = true
 telemetry_events.workspace = true
 terminal_view.workspace = true
+workforme_panel.workspace = true
 theme.workspace = true
 theme_settings.workspace = true
 theme_extension.workspace = true

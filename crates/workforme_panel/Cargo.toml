@@ -1,0 +1,26 @@
+[package]
+name = "workforme_panel"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/workforme_panel.rs"
+doctest = false
+
+[dependencies]
+anyhow.workspace = true
+log.workspace = true
+serde_json.workspace = true
+collections.workspace = true
+dirs.workspace = true
+gpui.workspace = true
+task.workspace = true
+ui.workspace = true
+util.workspace = true
+workspace.workspace = true
+zed_actions.workspace = true
