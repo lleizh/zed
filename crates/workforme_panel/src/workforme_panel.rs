@@ -143,8 +143,8 @@ pub struct WorkformeTask {
 }
 
 impl WorkformeTask {
-    fn is_review(&self) -> bool {
-        self.task_type.as_deref() == Some("review")
+    fn uses_dynamic_stages(&self) -> bool {
+        matches!(self.task_type.as_deref(), Some("review" | "analyst"))
     }
 
     fn current_stage(&self) -> &Stage {
@@ -158,7 +158,7 @@ impl WorkformeTask {
     }
 
     fn latest_session_id(&self) -> Option<&str> {
-        if self.is_review() {
+        if self.uses_dynamic_stages() {
             return self.dynamic_stages.iter().rev()
                 .find_map(|s| s.session_id.as_deref());
         }
@@ -558,10 +558,10 @@ fn parse_task_dir(task_dir: &Path) -> Option<WorkformeTask> {
     let mut sessions = HashMap::new();
     let mut dynamic_stages = Vec::new();
 
-    let is_review = task_type.as_deref() == Some("review");
+    let uses_dynamic = matches!(task_type.as_deref(), Some("review" | "analyst"));
 
     if let Some(stages_obj) = state_value.get("stages").and_then(|v| v.as_object()) {
-        if is_review {
+        if uses_dynamic {
             for (key, val) in stages_obj {
                 if let Some(stage_val) = val.as_object() {
                     let status_str = stage_val.get("status").and_then(|v| v.as_str()).unwrap_or("not_started");
@@ -729,10 +729,10 @@ fn render_task_row(
                             .color(ui::Color::Muted),
                     )
                 })
-                .when(task.is_review(), |el| {
+                .when(task.uses_dynamic_stages(), |el| {
                     el.child(render_dynamic_badges(&task.dynamic_stages, cx))
                 })
-                .when(!task.is_review(), |el| {
+                .when(!task.uses_dynamic_stages(), |el| {
                     el.child(render_stage_badges(task, current_stage, cx))
                 }),
         )
@@ -1108,7 +1108,7 @@ impl Render for WorkformeTaskView {
             )
             // Pipeline visualization
             .child(div().h(px(1.)).bg(cx.theme().colors().border))
-            .when(self.task.is_review(), |el| {
+            .when(self.task.uses_dynamic_stages(), |el| {
                 let entity = entity.clone();
                 el.child(
                     v_flex()
@@ -1211,7 +1211,7 @@ impl Render for WorkformeTaskView {
                         })),
                 )
             })
-            .when(!self.task.is_review(), |el| el.child(
+            .when(!self.task.uses_dynamic_stages(), |el| el.child(
                 v_flex()
                     .py_2()
                     .pl_2()
