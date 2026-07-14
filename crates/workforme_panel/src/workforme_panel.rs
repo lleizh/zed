@@ -12,10 +12,13 @@ use gpui::{
     actions, anchored, deferred, div, px,
 };
 use task::{HideStrategy, RevealStrategy, SaveStrategy, SpawnInTerminal, TaskId};
-use ui::{ActiveTheme, ContextMenu, FluentBuilder, IconName, Label, LabelCommon, h_flex, v_flex};
+use ui::{
+    ActiveTheme, ButtonCommon, Clickable, ContextMenu, FluentBuilder, IconButton, IconName,
+    IconSize, Label, LabelCommon, Tooltip, h_flex, v_flex,
+};
 use util::shell::Shell;
 use workspace::{
-    OpenOptions, Workspace,
+    Workspace,
     dock::{DockPosition, Panel, PanelEvent},
     item::{Item, ItemEvent},
 };
@@ -42,29 +45,6 @@ impl Stage {
         &[Stage::Plan, Stage::Implement, Stage::Check, Stage::CodexReview, Stage::Fix, Stage::Pr, Stage::Fixer]
     }
 
-    fn marker_filename(&self) -> &'static str {
-        match self {
-            Stage::Plan => ".done-plan",
-            Stage::Implement => ".done-implement",
-            Stage::Check => ".done-check",
-            Stage::CodexReview => ".done-codex-review",
-            Stage::Pr => ".done-pr",
-            Stage::Fix => ".done-fix",
-            Stage::Fixer => ".done-fixer",
-        }
-    }
-
-    fn session_filename(&self) -> &'static str {
-        match self {
-            Stage::Plan => ".session-plan",
-            Stage::Implement => ".session-implement",
-            Stage::Check => ".session-check",
-            Stage::CodexReview => ".session-codex-review",
-            Stage::Pr => ".session-pr",
-            Stage::Fix => ".session-fix",
-            Stage::Fixer => ".session-fixer",
-        }
-    }
 
     fn label(&self) -> &'static str {
         match self {
@@ -139,7 +119,7 @@ enum StageStatus {
 }
 
 #[derive(Debug, Clone)]
-struct WorkformeTask {
+pub struct WorkformeTask {
     id: String,
     date: String,
     repo: Option<String>,
@@ -147,6 +127,7 @@ struct WorkformeTask {
     branch: Option<String>,
     task_type: Option<String>,
     url: Option<String>,
+    pr_url: Option<String>,
     worktree: Option<String>,
     stages: HashMap<Stage, StageStatus>,
     sessions: HashMap<Stage, String>,
@@ -184,12 +165,6 @@ pub struct WorkformePanel {
 }
 
 
-#[allow(dead_code)]
-pub enum Event {
-    Focus,
-}
-
-impl EventEmitter<Event> for WorkformePanel {}
 impl EventEmitter<PanelEvent> for WorkformePanel {}
 
 impl WorkformePanel {
@@ -206,10 +181,18 @@ impl WorkformePanel {
             async move |this: WeakEntity<Self>, cx| {
                 loop {
                     cx.background_executor().timer(POLL_INTERVAL).await;
+                    let work_dir = {
+                        let Ok(result) = this.update(cx, |panel, _cx| {
+                            panel.workforme_root.join(".work")
+                        }) else { break };
+                        result
+                    };
+                    let tasks = cx.background_executor().spawn(async move {
+                        load_tasks_from_disk(&work_dir)
+                    }).await;
                     let result = this.update(cx, |panel, cx| {
-                        let old_tasks = panel.tasks.clone();
-                        panel.load_tasks();
-                        if panel.tasks != old_tasks {
+                        if panel.tasks != tasks {
+                            panel.tasks = tasks;
                             cx.notify();
                         }
                     });
@@ -235,118 +218,7 @@ impl WorkformePanel {
 
     fn load_tasks(&mut self) {
         let work_dir = self.workforme_root.join(".work");
-        let mut tasks = Vec::new();
-
-        let Ok(entries) = std::fs::read_dir(&work_dir) else {
-            return;
-        };
-
-        for entry in entries.flatten() {
-            let task_dir = entry.path();
-            if !task_dir.is_dir() {
-                continue;
-            }
-
-            // 外部ステータス検知: running だが output file がある → done に更新
-            self.detect_completion(&task_dir);
-
-            if let Some(task) = self.parse_task_dir(&task_dir) {
-                tasks.push(task);
-            }
-        }
-
-        // 新しい順にソート
-        tasks.sort_by(|a, b| b.date.cmp(&a.date));
-        self.tasks = tasks;
-    }
-
-    fn detect_completion(&self, task_dir: &Path) {
-        let state_file = task_dir.join("state.json");
-        let Ok(content) = std::fs::read_to_string(&state_file) else { return };
-        let Ok(mut state) = serde_json::from_str::<serde_json::Value>(&content) else { return };
-
-        let mut changed = false;
-
-        if let Some(stages) = state.get_mut("stages").and_then(|v| v.as_object_mut()) {
-            for stage in Stage::all() {
-                let key = stage.state_key();
-                if let Some(stage_val) = stages.get_mut(key).and_then(|v| v.as_object_mut()) {
-                    let status = stage_val.get("status").and_then(|v| v.as_str()).unwrap_or("");
-                    if status == "running" {
-                        let output_file = task_dir.join(stage.output_filename());
-                        if output_file.exists() {
-                            stage_val.insert("status".to_string(), serde_json::Value::String("done".to_string()));
-                            changed = true;
-                        }
-                    }
-                }
-            }
-        }
-
-        if changed {
-            if let Ok(json_str) = serde_json::to_string_pretty(&state) {
-                let _ = std::fs::write(&state_file, json_str);
-            }
-        }
-    }
-
-    fn parse_task_dir(&self, task_dir: &Path) -> Option<WorkformeTask> {
-        let id = task_dir.file_name()?.to_str()?.to_string();
-
-        // state.json から全情報を読む（唯一の情報源）
-        let state_content = std::fs::read_to_string(task_dir.join("state.json")).ok()?;
-        let state_value = serde_json::from_str::<serde_json::Value>(&state_content).ok()?;
-
-        let repo = state_value.get("repo").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let title = state_value.get("title").and_then(|v| v.as_str()).unwrap_or(&id).to_string();
-        let branch = state_value.get("branch").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let task_type = state_value.get("type").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let url = state_value.get("url").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let date = state_value.get("created").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
-        let worktree = state_value.get("worktree").and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string());
-
-        let mut stages = HashMap::new();
-        let mut sessions = HashMap::new();
-
-        if let Some(stages_obj) = state_value.get("stages").and_then(|v| v.as_object()) {
-            for stage in Stage::all() {
-                let stage_key = stage.state_key();
-                if let Some(stage_val) = stages_obj.get(stage_key).and_then(|v| v.as_object()) {
-                    let status_str = stage_val.get("status").and_then(|v| v.as_str()).unwrap_or("not_started");
-                    let session_id = stage_val.get("session_id").and_then(|v| v.as_str())
-                        .filter(|s| !s.is_empty())
-                        .map(|s| s.to_string());
-
-                    if let Some(ref sid) = session_id {
-                        sessions.insert(stage.clone(), sid.clone());
-                    }
-
-                    let status = match status_str {
-                        "done" => StageStatus::Done,
-                        "running" => StageStatus::InProgress(session_id),
-                        _ => StageStatus::NotStarted,
-                    };
-                    stages.insert(stage.clone(), status);
-                } else {
-                    stages.insert(stage.clone(), StageStatus::NotStarted);
-                }
-            }
-        }
-
-        Some(WorkformeTask {
-            id,
-            date,
-            repo,
-            title,
-            branch,
-            task_type,
-            url,
-            worktree,
-            stages,
-            sessions,
-        })
+        self.tasks = load_tasks_from_disk(&work_dir);
     }
 
     pub fn reload(&mut self, cx: &mut Context<Self>) {
@@ -558,17 +430,9 @@ impl Render for WorkformePanel {
                             .color(ui::Color::Muted),
                     )
                     .child(
-                        div()
-                            .id("wfm-add-task")
-                            .px_1()
-                            .rounded_sm()
-                            .cursor_pointer()
-                            .hover(|s| s.bg(cx.theme().colors().ghost_element_hover))
-                            .child(
-                                Label::new("+")
-                                    .size(ui::LabelSize::Default)
-                                    .color(ui::Color::Accent),
-                            )
+                        IconButton::new("wfm-add-task", IconName::Plus)
+                            .icon_size(IconSize::Small)
+                            .tooltip(Tooltip::text("New Task"))
                             .on_click(move |_event, window, cx| {
                                 let spawn = SpawnInTerminal {
                                     id: TaskId("workforme-new".to_string()),
@@ -605,9 +469,20 @@ impl Render for WorkformePanel {
                     .overflow_y_scroll()
                     .when(date_sections.is_empty(), |el| {
                         el.child(
-                            div()
+                            v_flex()
                                 .p_4()
-                                .child(Label::new("No tasks found").color(ui::Color::Muted)),
+                                .gap_2()
+                                .items_center()
+                                .child(
+                                    Label::new("No tasks yet")
+                                        .size(ui::LabelSize::Small)
+                                        .color(ui::Color::Muted),
+                                )
+                                .child(
+                                    Label::new("Click + to start a new task")
+                                        .size(ui::LabelSize::XSmall)
+                                        .color(ui::Color::Muted),
+                                ),
                         )
                     })
                     .children(date_sections),
@@ -622,6 +497,86 @@ impl Render for WorkformePanel {
                 .with_priority(3)
             }))
     }
+}
+
+fn load_tasks_from_disk(work_dir: &Path) -> Vec<WorkformeTask> {
+    let Ok(entries) = std::fs::read_dir(work_dir) else {
+        return Vec::new();
+    };
+
+    let mut tasks = Vec::new();
+    for entry in entries.flatten() {
+        let task_dir = entry.path();
+        if !task_dir.is_dir() {
+            continue;
+        }
+        if let Some(task) = parse_task_dir(&task_dir) {
+            tasks.push(task);
+        }
+    }
+
+    tasks.sort_by(|a, b| b.date.cmp(&a.date));
+    tasks
+}
+
+fn parse_task_dir(task_dir: &Path) -> Option<WorkformeTask> {
+    let id = task_dir.file_name()?.to_str()?.to_string();
+
+    let state_content = std::fs::read_to_string(task_dir.join("state.json")).ok()?;
+    let state_value = serde_json::from_str::<serde_json::Value>(&state_content).ok()?;
+
+    let repo = state_value.get("repo").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let title = state_value.get("title").and_then(|v| v.as_str()).unwrap_or(&id).to_string();
+    let branch = state_value.get("branch").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let task_type = state_value.get("type").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let url = state_value.get("url").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let pr_url = state_value.get("pr_url").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let date = state_value.get("created").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
+    let worktree = state_value.get("worktree").and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    let mut stages = HashMap::new();
+    let mut sessions = HashMap::new();
+
+    if let Some(stages_obj) = state_value.get("stages").and_then(|v| v.as_object()) {
+        for stage in Stage::all() {
+            let stage_key = stage.state_key();
+            if let Some(stage_val) = stages_obj.get(stage_key).and_then(|v| v.as_object()) {
+                let status_str = stage_val.get("status").and_then(|v| v.as_str()).unwrap_or("not_started");
+                let session_id = stage_val.get("session_id").and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string());
+
+                if let Some(ref sid) = session_id {
+                    sessions.insert(stage.clone(), sid.clone());
+                }
+
+                let status = match status_str {
+                    "done" => StageStatus::Done,
+                    "running" => StageStatus::InProgress(session_id),
+                    _ => StageStatus::NotStarted,
+                };
+                stages.insert(stage.clone(), status);
+            } else {
+                stages.insert(stage.clone(), StageStatus::NotStarted);
+            }
+        }
+    }
+
+    Some(WorkformeTask {
+        id,
+        date,
+        repo,
+        title,
+        branch,
+        task_type,
+        url,
+        pr_url,
+        worktree,
+        stages,
+        sessions,
+    })
 }
 
 fn render_task_row(
@@ -702,18 +657,35 @@ fn render_task_row(
             }
         })
         .child(
-            h_flex().gap_2().child(
-                Label::new(task.title.clone())
-                    .size(ui::LabelSize::Default),
-            ),
+            h_flex()
+                .gap_1()
+                .items_center()
+                .child(
+                    Label::new(task.title.clone())
+                        .size(ui::LabelSize::Default),
+                )
+                .when_some(task.task_type.clone(), |el, task_type| {
+                    el.child(
+                        div()
+                            .px_1()
+                            .rounded_sm()
+                            .bg(cx.theme().colors().element_background)
+                            .child(
+                                Label::new(task_type)
+                                    .size(ui::LabelSize::XSmall)
+                                    .color(ui::Color::Muted),
+                            ),
+                    )
+                }),
         )
         .child(
             h_flex()
                 .gap_1()
+                .items_center()
                 .when_some(task.repo.clone(), |el, repo| {
                     el.child(
                         Label::new(repo)
-                            .size(ui::LabelSize::Small)
+                            .size(ui::LabelSize::XSmall)
                             .color(ui::Color::Muted),
                     )
                 })
@@ -847,12 +819,22 @@ impl WorkformeTaskView {
         cx: &mut Context<Self>,
     ) -> Self {
         let poll_task = cx.spawn({
+            let workforme_root = workforme_root.clone();
+            let task_id = task.id.clone();
             async move |this: WeakEntity<Self>, cx| {
                 loop {
                     cx.background_executor().timer(Duration::from_secs(3)).await;
+                    let task_dir = workforme_root.join(".work").join(&task_id);
+                    let updated = cx.background_executor().spawn(async move {
+                        parse_task_dir(&task_dir)
+                    }).await;
                     let result = this.update(cx, |view, cx| {
-                        view.reload_task();
-                        cx.notify();
+                        if let Some(updated) = updated {
+                            if view.task != updated {
+                                view.task = updated;
+                                cx.notify();
+                            }
+                        }
                     });
                     if result.is_err() {
                         break;
@@ -870,54 +852,8 @@ impl WorkformeTaskView {
         }
     }
 
-    fn reload_task(&mut self) {
-        let task_dir = self.workforme_root.join(".work").join(&self.task.id);
-        let state_file = task_dir.join("state.json");
-        let Ok(content) = std::fs::read_to_string(&state_file) else { return };
-        let Ok(state_value) = serde_json::from_str::<serde_json::Value>(&content) else { return };
-
-        // detect completion
-        if let Some(stages_obj) = state_value.get("stages").and_then(|v| v.as_object()) {
-            for stage in Stage::all() {
-                let key = stage.state_key();
-                if let Some(stage_val) = stages_obj.get(key).and_then(|v| v.as_object()) {
-                    let status_str = stage_val.get("status").and_then(|v| v.as_str()).unwrap_or("not_started");
-                    let session_id = stage_val.get("session_id").and_then(|v| v.as_str())
-                        .filter(|s| !s.is_empty())
-                        .map(|s| s.to_string());
-
-                    if let Some(ref sid) = session_id {
-                        self.task.sessions.insert(stage.clone(), sid.clone());
-                    }
-
-                    let output_file = task_dir.join(stage.output_filename());
-                    let status = if status_str == "done" || (status_str == "running" && output_file.exists()) {
-                        StageStatus::Done
-                    } else if status_str == "running" {
-                        StageStatus::InProgress(session_id)
-                    } else {
-                        StageStatus::NotStarted
-                    };
-                    self.task.stages.insert(stage.clone(), status);
-                }
-            }
-        }
-    }
-
     fn work_dir(&self) -> PathBuf {
         self.workforme_root.join(".work").join(&self.task.id)
-    }
-
-    fn available_files(&self) -> Vec<(&'static str, PathBuf)> {
-        let work = self.work_dir();
-        let mut files = Vec::new();
-        for stage in Stage::all() {
-            let path = work.join(stage.output_filename());
-            if path.exists() {
-                files.push((stage.label(), path));
-            }
-        }
-        files
     }
 
     fn next_stage(&self) -> Option<&'static str> {
@@ -990,15 +926,6 @@ impl WorkformeTaskView {
         self.spawn_command("claude", vec!["attach".to_string(), short_id.to_string()], "attach", self.repo_path(), window, cx);
     }
 
-    fn open_repo(&self) {
-        if let Some(path) = self.repo_path() {
-            std::process::Command::new("/Applications/Zed.app/Contents/MacOS/cli")
-                .arg("-n")
-                .arg(&path)
-                .spawn()
-                .ok();
-        }
-    }
 }
 
 impl EventEmitter<ItemEvent> for WorkformeTaskView {}
@@ -1013,11 +940,8 @@ impl Render for WorkformeTaskView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let repo_info = self.task.repo.clone().unwrap_or_else(|| "—".to_string());
         let next_stage = self.next_stage().map(|s| s.to_string());
-        let session_id = self.task.latest_session_id().map(|s| s.to_string());
         let repo_path = self.repo_path();
-        let task_id = self.task.id.clone();
         let entity = cx.entity().downgrade();
-        let files = self.available_files();
 
         div()
             .id("workforme-task-view")
@@ -1028,33 +952,93 @@ impl Render for WorkformeTaskView {
             .gap_3()
             .overflow_y_scroll()
             .track_focus(&self.focus_handle)
-            // Title + meta
+            // Title + meta table
             .child(
                 v_flex()
                     .gap_1()
                     .child(Label::new(self.task.title.clone()).size(ui::LabelSize::Large))
                     .child(
-                        h_flex()
-                            .gap_2()
-                            .child(Label::new(format!("repo: {}", repo_info)).size(ui::LabelSize::Small).color(ui::Color::Muted))
-                            .when_some(self.task.task_type.clone(), |el, t| {
-                                el.child(Label::new(t).size(ui::LabelSize::XSmall).color(ui::Color::Accent))
-                            }),
-                    )
-                    .when_some(self.task.branch.clone(), |el, branch| {
-                        el.child(Label::new(format!("branch: {}", branch)).size(ui::LabelSize::XSmall).color(ui::Color::Muted))
-                    })
-                    .when_some(self.task.url.clone(), |el, url| {
-                        el.child(Label::new(url).size(ui::LabelSize::XSmall).color(ui::Color::Muted))
-                    }),
+                        v_flex()
+                            .gap_0p5()
+                            .py_1()
+                            // Repo row
+                            .child(
+                                h_flex()
+                                    .child(div().w(px(60.)).child(Label::new("Repo").size(ui::LabelSize::XSmall).color(ui::Color::Muted)))
+                                    .child(Label::new(repo_info.clone()).size(ui::LabelSize::XSmall))
+                                    .when_some(self.task.task_type.clone(), |el, t| {
+                                        el.child(
+                                            div().ml_2().px_1().rounded_sm().bg(cx.theme().colors().element_background)
+                                                .child(Label::new(t).size(ui::LabelSize::XSmall).color(ui::Color::Accent))
+                                        )
+                                    })
+                            )
+                            // Branch row (clickable → open repo)
+                            .when_some(self.task.branch.clone(), |el, branch| {
+                                let worktree = self.task.worktree.clone();
+                                el.child(
+                                    h_flex()
+                                        .child(div().w(px(60.)).child(Label::new("Branch").size(ui::LabelSize::XSmall).color(ui::Color::Muted)))
+                                        .child(
+                                            div()
+                                                .id("wfm-open-repo")
+                                                .cursor_pointer()
+                                                .child(Label::new(format!("{}  ↗", branch)).size(ui::LabelSize::XSmall).color(ui::Color::Accent))
+                                                .on_click(move |_event, _window, _cx| {
+                                                    if let Some(ref path) = worktree {
+                                                        std::process::Command::new("/Applications/Zed.app/Contents/MacOS/cli")
+                                                            .arg("-n")
+                                                            .arg(path)
+                                                            .spawn()
+                                                            .ok();
+                                                    }
+                                                })
+                                        )
+                                )
+                            })
+                            // Issue row (clickable → open in browser)
+                            .when_some(self.task.url.clone(), |el, url| {
+                                let url_clone = url.clone();
+                                el.child(
+                                    h_flex()
+                                        .child(div().w(px(60.)).child(Label::new("Issue").size(ui::LabelSize::XSmall).color(ui::Color::Muted)))
+                                        .child(
+                                            div()
+                                                .id("wfm-issue-url")
+                                                .cursor_pointer()
+                                                .child(Label::new(url).size(ui::LabelSize::XSmall).color(ui::Color::Accent))
+                                                .on_click(move |_event, _window, cx| {
+                                                    cx.open_url(&url_clone);
+                                                })
+                                        )
+                                )
+                            })
+                            // PR row (clickable → open in browser)
+                            .when_some(self.task.pr_url.clone(), |el, pr_url| {
+                                let pr_url_clone = pr_url.clone();
+                                el.child(
+                                    h_flex()
+                                        .child(div().w(px(60.)).child(Label::new("PR").size(ui::LabelSize::XSmall).color(ui::Color::Muted)))
+                                        .child(
+                                            div()
+                                                .id("wfm-pr-url")
+                                                .cursor_pointer()
+                                                .child(Label::new(pr_url).size(ui::LabelSize::XSmall).color(ui::Color::Accent))
+                                                .on_click(move |_event, _window, cx| {
+                                                    cx.open_url(&pr_url_clone);
+                                                })
+                                        )
+                                )
+                            })
+                    ),
             )
             // Pipeline visualization
             .child(div().h(px(1.)).bg(cx.theme().colors().border))
             .child(
                 v_flex()
-                    .gap_2()
                     .py_2()
-                    .children(Stage::all().iter().enumerate().map(|(i, stage)| {
+                    .pl_2()
+                    .children(Stage::all().iter().enumerate().flat_map(|(i, stage)| {
                         let status = self.task.stages.get(stage).cloned().unwrap_or(StageStatus::NotStarted);
                         let is_next = next_stage.as_deref() == Some(stage.command());
                         let stage_cmd = stage.command();
@@ -1072,23 +1056,29 @@ impl Render for WorkformeTaskView {
                             StageStatus::NotStarted => ("○", "—", ui::Color::Muted),
                         };
 
-                        let entity_for_run = entity.clone();
-                        let tid_for_run = task_id.clone();
-                        let stage_cmd_str = stage_cmd.to_string();
+                        let connector: Option<gpui::AnyElement> = if i > 0 {
+                            Some(
+                                div()
+                                    .ml(px(7.))
+                                    .w(px(1.))
+                                    .h(px(8.))
+                                    .bg(cx.theme().colors().border)
+                                    .into_any_element()
+                            )
+                        } else {
+                            None
+                        };
 
-                        h_flex()
+                        let row = h_flex()
                             .gap_2()
                             .py_0p5()
                             .items_center()
-                            // Indicator
                             .child(Label::new(indicator).size(ui::LabelSize::Default).color(color))
-                            // Stage name
                             .child(
                                 div().w(px(80.)).child(
                                     Label::new(stage.label()).size(ui::LabelSize::Small).color(color)
                                 )
                             )
-                            // Status
                             .child(
                                 div().w(px(60.)).child(
                                     Label::new(status_label).size(ui::LabelSize::XSmall).color(ui::Color::Muted)
@@ -1196,6 +1186,9 @@ impl Render for WorkformeTaskView {
                                     )
                                 },
                             )
+                            .into_any_element();
+
+                        connector.into_iter().chain(std::iter::once(row))
                     })),
             )
             // Divider
