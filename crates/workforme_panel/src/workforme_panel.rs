@@ -116,6 +116,7 @@ enum StageStatus {
     NotStarted,
     InProgress(Option<String>),
     Done,
+    Failed,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -570,6 +571,7 @@ fn parse_task_dir(task_dir: &Path) -> Option<WorkformeTask> {
                         .map(|s| s.to_string());
                     let status = match status_str {
                         "done" => StageStatus::Done,
+                        "failed" => StageStatus::Failed,
                         "running" => StageStatus::InProgress(session_id.clone()),
                         _ => StageStatus::NotStarted,
                     };
@@ -592,6 +594,7 @@ fn parse_task_dir(task_dir: &Path) -> Option<WorkformeTask> {
 
                     let status = match status_str {
                         "done" => StageStatus::Done,
+                        "failed" => StageStatus::Failed,
                         "running" => StageStatus::InProgress(session_id),
                         _ => StageStatus::NotStarted,
                     };
@@ -748,6 +751,10 @@ fn render_stage_badges(task: &WorkformeTask, current_stage: &Stage, cx: &App) ->
                 cx.theme().colors().ghost_element_selected,
                 ui::Color::Success,
             ),
+            StageStatus::Failed => (
+                cx.theme().colors().ghost_element_selected,
+                ui::Color::Error,
+            ),
             StageStatus::InProgress(_) => (
                 cx.theme().colors().ghost_element_hover,
                 ui::Color::Warning,
@@ -785,6 +792,10 @@ fn render_dynamic_badges(stages: &[DynStage], cx: &App) -> impl IntoElement {
             StageStatus::Done => (
                 cx.theme().colors().ghost_element_selected,
                 ui::Color::Success,
+            ),
+            StageStatus::Failed => (
+                cx.theme().colors().ghost_element_selected,
+                ui::Color::Error,
             ),
             StageStatus::InProgress(_) => (
                 cx.theme().colors().ghost_element_hover,
@@ -937,7 +948,7 @@ impl WorkformeTaskView {
             match status {
                 StageStatus::Done => continue,
                 StageStatus::InProgress(_) => return None,
-                StageStatus::NotStarted => {
+                StageStatus::Failed | StageStatus::NotStarted => {
                     return Some(stage.command());
                 }
             }
@@ -1117,11 +1128,13 @@ impl Render for WorkformeTaskView {
                         .children(self.task.dynamic_stages.iter().enumerate().map(|(i, dyn_stage)| {
                             let (indicator, color) = match &dyn_stage.status {
                                 StageStatus::Done => ("●", ui::Color::Success),
+                                StageStatus::Failed => ("✗", ui::Color::Error),
                                 StageStatus::InProgress(_) => ("◐", ui::Color::Warning),
                                 StageStatus::NotStarted => ("○", ui::Color::Muted),
                             };
                             let status_label = match &dyn_stage.status {
                                 StageStatus::Done => "done",
+                                StageStatus::Failed => "failed",
                                 StageStatus::InProgress(_) => "running",
                                 StageStatus::NotStarted => "—",
                             };
@@ -1227,6 +1240,7 @@ impl Render for WorkformeTaskView {
 
                         let (indicator, status_label, color) = match &status {
                             StageStatus::Done => ("●", "done", ui::Color::Success),
+                            StageStatus::Failed => ("✗", "failed", ui::Color::Error),
                             StageStatus::InProgress(_) => ("◐", "running", ui::Color::Warning),
                             StageStatus::NotStarted if is_next => ("→", "ready", ui::Color::Accent),
                             StageStatus::NotStarted if optional => ("◇", "optional", ui::Color::Muted),
@@ -1263,7 +1277,7 @@ impl Render for WorkformeTaskView {
                             )
                             // Run button: prerequisite が done のときのみ表示
                             .when({
-                                let can_run = matches!(status, StageStatus::NotStarted) && stage.prerequisite().map_or(true, |pre| {
+                                let can_run = matches!(status, StageStatus::NotStarted | StageStatus::Failed) && stage.prerequisite().map_or(true, |pre| {
                                     self.task.stages.get(pre).map_or(false, |s| matches!(s, StageStatus::Done))
                                 });
                                 can_run
