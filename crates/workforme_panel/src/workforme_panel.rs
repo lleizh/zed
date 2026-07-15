@@ -989,7 +989,6 @@ impl WorkformeTaskView {
     }
 
     fn run_stage(&self, stage_cmd: &str, _window: &mut Window, _cx: &mut Context<Self>) {
-        let script = self.workforme_root.join("scripts/run-stage.sh");
         let task_dir = self.workforme_root.join(".work").join(&self.task.id);
 
         let stage_name = match stage_cmd {
@@ -997,8 +996,18 @@ impl WorkformeTaskView {
             other => other,
         };
 
-        // run-stage.sh が state.json を更新 + agent を起動する
-        // UI 更新は polling スレッドが担当
+        // failed/running は retry（stop-agents + reset + run）、それ以外は直接 run
+        let stage_enum = Stage::all().iter().find(|s| s.command() == stage_cmd);
+        let needs_retry = stage_enum.map_or(false, |s| {
+            matches!(self.task.stages.get(s), Some(StageStatus::Failed | StageStatus::InProgress(_)))
+        });
+
+        let script = if needs_retry {
+            self.workforme_root.join("scripts/retry-stage.sh")
+        } else {
+            self.workforme_root.join("scripts/run-stage.sh")
+        };
+
         std::process::Command::new("bash")
             .arg(&script)
             .arg(&task_dir)
@@ -1008,7 +1017,8 @@ impl WorkformeTaskView {
     }
 
     fn open_session(&self, short_id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.spawn_command("claude", vec!["attach".to_string(), short_id.to_string()], "attach", self.repo_path(), window, cx);
+        let script = format!("claude attach {} 2>/dev/null || claude --resume {}", short_id, short_id);
+        self.spawn_command("bash", vec!["-c".to_string(), script], "attach", self.repo_path(), window, cx);
     }
 
 }
