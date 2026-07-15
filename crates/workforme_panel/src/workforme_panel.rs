@@ -1017,8 +1017,7 @@ impl WorkformeTaskView {
     }
 
     fn open_session(&self, short_id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let script = format!("claude attach {} 2>/dev/null || claude --resume {}", short_id, short_id);
-        self.spawn_command("bash", vec!["-c".to_string(), script], "attach", self.repo_path(), window, cx);
+        self.spawn_command("claude", vec!["attach".to_string(), short_id.to_string()], "attach", self.repo_path(), window, cx);
     }
 
 }
