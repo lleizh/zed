@@ -42,9 +42,16 @@ enum Stage {
 
 impl Stage {
     fn all() -> &'static [Stage] {
-        &[Stage::Plan, Stage::Implement, Stage::Check, Stage::CodexReview, Stage::Fix, Stage::Pr, Stage::Fixer]
+        &[
+            Stage::Plan,
+            Stage::Implement,
+            Stage::Check,
+            Stage::CodexReview,
+            Stage::Fix,
+            Stage::Pr,
+            Stage::Fixer,
+        ]
     }
-
 
     fn label(&self) -> &'static str {
         match self {
@@ -160,7 +167,10 @@ impl WorkformeTask {
 
     fn latest_session_id(&self) -> Option<&str> {
         if self.uses_dynamic_stages() {
-            return self.dynamic_stages.iter().rev()
+            return self
+                .dynamic_stages
+                .iter()
+                .rev()
                 .find_map(|s| s.session_id.as_deref());
         }
         for stage in Stage::all().iter().rev() {
@@ -170,7 +180,6 @@ impl WorkformeTask {
         }
         None
     }
-
 }
 
 pub struct WorkformePanel {
@@ -182,7 +191,6 @@ pub struct WorkformePanel {
     workspace: WeakEntity<Workspace>,
     _poll_task: Task<()>,
 }
-
 
 impl EventEmitter<PanelEvent> for WorkformePanel {}
 
@@ -201,14 +209,17 @@ impl WorkformePanel {
                 loop {
                     cx.background_executor().timer(POLL_INTERVAL).await;
                     let work_dir = {
-                        let Ok(result) = this.update(cx, |panel, _cx| {
-                            panel.workforme_root.join(".work")
-                        }) else { break };
+                        let Ok(result) =
+                            this.update(cx, |panel, _cx| panel.workforme_root.join(".work"))
+                        else {
+                            break;
+                        };
                         result
                     };
-                    let tasks = cx.background_executor().spawn(async move {
-                        load_tasks_from_disk(&work_dir)
-                    }).await;
+                    let tasks = cx
+                        .background_executor()
+                        .spawn(async move { load_tasks_from_disk(&work_dir) })
+                        .await;
                     let result = this.update(cx, |panel, cx| {
                         if panel.tasks != tasks {
                             panel.tasks = tasks;
@@ -273,7 +284,10 @@ impl WorkformePanel {
                         let cwd = repo_for_term.clone();
                         move |window, cx| {
                             let short_id = sid[..8.min(sid.len())].to_string();
-                            let script = format!("claude attach {} 2>/dev/null || claude --resume {}", short_id, sid);
+                            let script = format!(
+                                "claude attach {} 2>/dev/null || claude --resume {}",
+                                short_id, sid
+                            );
                             let spawn = SpawnInTerminal {
                                 id: TaskId("workforme-resume".to_string()),
                                 full_label: "workforme: session".to_string(),
@@ -325,7 +339,11 @@ impl WorkformePanel {
             let root_for_delete = workforme_root.clone();
             let entity_for_delete = entity.clone();
             menu = menu.separator().custom_entry(
-                move |_window, _cx| Label::new("Delete Task").color(ui::Color::Error).into_any_element(),
+                move |_window, _cx| {
+                    Label::new("Delete Task")
+                        .color(ui::Color::Error)
+                        .into_any_element()
+                },
                 move |_window, cx| {
                     let task_dir = root_for_delete.join(".work").join(&task_id_for_delete);
                     let script = root_for_delete.join("scripts/delete-task.sh");
@@ -355,7 +373,6 @@ impl WorkformePanel {
         cx.notify();
     }
 }
-
 
 impl Focusable for WorkformePanel {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
@@ -421,7 +438,14 @@ impl Render for WorkformePanel {
             // Task rows (if not collapsed)
             if !is_collapsed {
                 for task in self.tasks.iter().filter(|t| &t.date == date) {
-                    let row = render_task_row(task, global_index, &workspace, &entity, &workforme_root, &*cx);
+                    let row = render_task_row(
+                        task,
+                        global_index,
+                        &workspace,
+                        &entity,
+                        &workforme_root,
+                        &*cx,
+                    );
                     date_sections.push(row.into_any_element());
                     global_index += 1;
                 }
@@ -544,14 +568,39 @@ fn parse_task_dir(task_dir: &Path) -> Option<WorkformeTask> {
     let state_content = std::fs::read_to_string(task_dir.join("state.json")).ok()?;
     let state_value = serde_json::from_str::<serde_json::Value>(&state_content).ok()?;
 
-    let repo = state_value.get("repo").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let title = state_value.get("title").and_then(|v| v.as_str()).unwrap_or(&id).to_string();
-    let branch = state_value.get("branch").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let task_type = state_value.get("type").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let url = state_value.get("url").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let pr_url = state_value.get("pr_url").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let date = state_value.get("created").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
-    let worktree = state_value.get("worktree").and_then(|v| v.as_str())
+    let repo = state_value
+        .get("repo")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let title = state_value
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&id)
+        .to_string();
+    let branch = state_value
+        .get("branch")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let task_type = state_value
+        .get("type")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let url = state_value
+        .get("url")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let pr_url = state_value
+        .get("pr_url")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let date = state_value
+        .get("created")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let worktree = state_value
+        .get("worktree")
+        .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
 
@@ -565,8 +614,13 @@ fn parse_task_dir(task_dir: &Path) -> Option<WorkformeTask> {
         if uses_dynamic {
             for (key, val) in stages_obj {
                 if let Some(stage_val) = val.as_object() {
-                    let status_str = stage_val.get("status").and_then(|v| v.as_str()).unwrap_or("not_started");
-                    let session_id = stage_val.get("session_id").and_then(|v| v.as_str())
+                    let status_str = stage_val
+                        .get("status")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("not_started");
+                    let session_id = stage_val
+                        .get("session_id")
+                        .and_then(|v| v.as_str())
                         .filter(|s| !s.is_empty())
                         .map(|s| s.to_string());
                     let status = match status_str {
@@ -576,15 +630,25 @@ fn parse_task_dir(task_dir: &Path) -> Option<WorkformeTask> {
                         _ => StageStatus::NotStarted,
                     };
                     let label = key[..1].to_uppercase() + &key[1..];
-                    dynamic_stages.push(DynStage { key: key.clone(), label, status, session_id });
+                    dynamic_stages.push(DynStage {
+                        key: key.clone(),
+                        label,
+                        status,
+                        session_id,
+                    });
                 }
             }
         } else {
             for stage in Stage::all() {
                 let stage_key = stage.state_key();
                 if let Some(stage_val) = stages_obj.get(stage_key).and_then(|v| v.as_object()) {
-                    let status_str = stage_val.get("status").and_then(|v| v.as_str()).unwrap_or("not_started");
-                    let session_id = stage_val.get("session_id").and_then(|v| v.as_str())
+                    let status_str = stage_val
+                        .get("status")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("not_started");
+                    let session_id = stage_val
+                        .get("session_id")
+                        .and_then(|v| v.as_str())
                         .filter(|s| !s.is_empty())
                         .map(|s| s.to_string());
 
@@ -642,7 +706,10 @@ fn render_task_row(
     let ctx_repo_path = cwd.clone();
 
     v_flex()
-        .id(gpui::ElementId::NamedInteger("workforme-task".into(), index as u64))
+        .id(gpui::ElementId::NamedInteger(
+            "workforme-task".into(),
+            index as u64,
+        ))
         .px_2()
         .py_1()
         .gap_0p5()
@@ -684,16 +751,23 @@ fn render_task_row(
                     ws_entity.update(cx, |workspace, cx| {
                         // 既存の view を探す（index で取得し borrow を解放）
                         let pane = workspace.active_pane();
-                        let existing_idx = pane.read(cx).items().position(|item| {
-                            item.tab_content_text(0, cx).as_ref() == tid.as_str()
-                        });
+                        let existing_idx = pane
+                            .read(cx)
+                            .items()
+                            .position(|item| item.tab_content_text(0, cx).as_ref() == tid.as_str());
                         if let Some(idx) = existing_idx {
                             pane.update(cx, |pane, cx| {
                                 pane.activate_item(idx, true, true, window, cx);
                             });
                         } else {
                             let view = cx.new(|cx| WorkformeTaskView::new(task, root, weak_ws, cx));
-                            workspace.add_item_to_active_pane(Box::new(view), None, true, window, cx);
+                            workspace.add_item_to_active_pane(
+                                Box::new(view),
+                                None,
+                                true,
+                                window,
+                                cx,
+                            );
                         }
                     });
                 }
@@ -703,10 +777,7 @@ fn render_task_row(
             h_flex()
                 .gap_1()
                 .items_center()
-                .child(
-                    Label::new(task.title.clone())
-                        .size(ui::LabelSize::Default),
-                )
+                .child(Label::new(task.title.clone()).size(ui::LabelSize::Default))
                 .when_some(task.task_type.clone(), |el, task_type| {
                     el.child(
                         div()
@@ -742,48 +813,45 @@ fn render_task_row(
 }
 
 fn render_stage_badges(task: &WorkformeTask, current_stage: &Stage, cx: &App) -> impl IntoElement {
-    h_flex().gap_0p5().children(Stage::all().iter().map(|stage| {
-        let status = task.stages.get(stage).cloned().unwrap_or(StageStatus::NotStarted);
-        let is_current = stage == current_stage;
+    h_flex()
+        .gap_0p5()
+        .children(Stage::all().iter().map(|stage| {
+            let status = task
+                .stages
+                .get(stage)
+                .cloned()
+                .unwrap_or(StageStatus::NotStarted);
+            let is_current = stage == current_stage;
 
-        let (color, text_color) = match &status {
-            StageStatus::Done => (
-                cx.theme().colors().ghost_element_selected,
-                ui::Color::Success,
-            ),
-            StageStatus::Failed => (
-                cx.theme().colors().ghost_element_selected,
-                ui::Color::Error,
-            ),
-            StageStatus::InProgress(_) => (
-                cx.theme().colors().ghost_element_hover,
-                ui::Color::Warning,
-            ),
-            StageStatus::NotStarted => {
-                if is_current {
-                    (
-                        cx.theme().colors().ghost_element_hover,
-                        ui::Color::Default,
-                    )
-                } else {
-                    (
-                        cx.theme().colors().ghost_element_background,
-                        ui::Color::Muted,
-                    )
+            let (color, text_color) = match &status {
+                StageStatus::Done => (
+                    cx.theme().colors().ghost_element_selected,
+                    ui::Color::Success,
+                ),
+                StageStatus::Failed => {
+                    (cx.theme().colors().ghost_element_selected, ui::Color::Error)
                 }
-            }
-        };
+                StageStatus::InProgress(_) => {
+                    (cx.theme().colors().ghost_element_hover, ui::Color::Warning)
+                }
+                StageStatus::NotStarted => {
+                    if is_current {
+                        (cx.theme().colors().ghost_element_hover, ui::Color::Default)
+                    } else {
+                        (
+                            cx.theme().colors().ghost_element_background,
+                            ui::Color::Muted,
+                        )
+                    }
+                }
+            };
 
-        div()
-            .px_1()
-            .rounded_sm()
-            .bg(color)
-            .child(
+            div().px_1().rounded_sm().bg(color).child(
                 Label::new(stage.label())
                     .size(ui::LabelSize::XSmall)
                     .color(text_color),
             )
-    }))
+        }))
 }
 
 fn render_dynamic_badges(stages: &[DynStage], cx: &App) -> impl IntoElement {
@@ -793,35 +861,29 @@ fn render_dynamic_badges(stages: &[DynStage], cx: &App) -> impl IntoElement {
                 cx.theme().colors().ghost_element_selected,
                 ui::Color::Success,
             ),
-            StageStatus::Failed => (
-                cx.theme().colors().ghost_element_selected,
-                ui::Color::Error,
-            ),
-            StageStatus::InProgress(_) => (
-                cx.theme().colors().ghost_element_hover,
-                ui::Color::Warning,
-            ),
+            StageStatus::Failed => (cx.theme().colors().ghost_element_selected, ui::Color::Error),
+            StageStatus::InProgress(_) => {
+                (cx.theme().colors().ghost_element_hover, ui::Color::Warning)
+            }
             StageStatus::NotStarted => (
                 cx.theme().colors().ghost_element_background,
                 ui::Color::Muted,
             ),
         };
 
-        div()
-            .px_1()
-            .rounded_sm()
-            .bg(color)
-            .child(
-                Label::new(stage.label.clone())
-                    .size(ui::LabelSize::XSmall)
-                    .color(text_color),
-            )
+        div().px_1().rounded_sm().bg(color).child(
+            Label::new(stage.label.clone())
+                .size(ui::LabelSize::XSmall)
+                .color(text_color),
+        )
     }))
 }
 
 impl PartialEq for WorkformeTask {
     fn eq(&self, other: &Self) -> bool {
-        self.id == other.id && self.stages == other.stages && self.dynamic_stages == other.dynamic_stages
+        self.id == other.id
+            && self.stages == other.stages
+            && self.dynamic_stages == other.dynamic_stages
     }
 }
 
@@ -910,9 +972,10 @@ impl WorkformeTaskView {
                 loop {
                     cx.background_executor().timer(Duration::from_secs(3)).await;
                     let task_dir = workforme_root.join(".work").join(&task_id);
-                    let updated = cx.background_executor().spawn(async move {
-                        parse_task_dir(&task_dir)
-                    }).await;
+                    let updated = cx
+                        .background_executor()
+                        .spawn(async move { parse_task_dir(&task_dir) })
+                        .await;
                     let result = this.update(cx, |view, cx| {
                         if let Some(updated) = updated {
                             if view.task != updated {
@@ -944,7 +1007,12 @@ impl WorkformeTaskView {
     fn next_stage(&self) -> Option<&'static str> {
         let stages = Stage::all();
         for stage in stages {
-            let status = self.task.stages.get(stage).cloned().unwrap_or(StageStatus::NotStarted);
+            let status = self
+                .task
+                .stages
+                .get(stage)
+                .cloned()
+                .unwrap_or(StageStatus::NotStarted);
             match status {
                 StageStatus::Done => continue,
                 StageStatus::InProgress(_) => return None,
@@ -960,7 +1028,15 @@ impl WorkformeTaskView {
         self.task.worktree.as_ref().map(|w| PathBuf::from(w))
     }
 
-    fn spawn_command(&self, command: &str, args: Vec<String>, label: &str, cwd: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+    fn spawn_command(
+        &self,
+        command: &str,
+        args: Vec<String>,
+        label: &str,
+        cwd: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let spawn = SpawnInTerminal {
             id: TaskId(format!("workforme-{}", label)),
             full_label: label.to_string(),
@@ -999,7 +1075,10 @@ impl WorkformeTaskView {
         // failed/running は retry（stop-agents + reset + run）、それ以外は直接 run
         let stage_enum = Stage::all().iter().find(|s| s.command() == stage_cmd);
         let needs_retry = stage_enum.map_or(false, |s| {
-            matches!(self.task.stages.get(s), Some(StageStatus::Failed | StageStatus::InProgress(_)))
+            matches!(
+                self.task.stages.get(s),
+                Some(StageStatus::Failed | StageStatus::InProgress(_))
+            )
         });
 
         let script = if needs_retry {
@@ -1016,10 +1095,23 @@ impl WorkformeTaskView {
             .ok();
     }
 
-    fn open_session(&self, short_id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.spawn_command("claude", vec!["attach".to_string(), short_id.to_string()], "attach", self.repo_path(), window, cx);
+    fn open_session(
+        &self,
+        short_id: &str,
+        stage_label: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let label = format!("[{}]{}", stage_label, &self.task.id);
+        self.spawn_command(
+            "claude",
+            vec!["attach".to_string(), short_id.to_string()],
+            &label,
+            self.repo_path(),
+            window,
+            cx,
+        );
     }
-
 }
 
 impl EventEmitter<ItemEvent> for WorkformeTaskView {}
@@ -1165,6 +1257,7 @@ impl Render for WorkformeTaskView {
                             if let Some(ref sid) = dyn_stage.session_id {
                                 let entity_for_attach = entity.clone();
                                 let sid = sid.clone();
+                                let stage_label_for_attach = dyn_stage.label.clone();
                                 let is_running = matches!(dyn_stage.status, StageStatus::InProgress(_));
                                 let btn_label = if is_running { "⏎ Attach" } else { "⏎ Resume" };
                                 let btn_color = if is_running { ui::Color::Warning } else { ui::Color::Default };
@@ -1180,8 +1273,9 @@ impl Render for WorkformeTaskView {
                                         .on_click(move |_event, window, cx| {
                                             if let Some(view) = entity_for_attach.upgrade() {
                                                 let short_id = sid[..8.min(sid.len())].to_string();
+                                                let stage_label = stage_label_for_attach.clone();
                                                 view.update(cx, |view, cx| {
-                                                    view.open_session(&short_id, window, cx);
+                                                    view.open_session(&short_id, &stage_label, window, cx);
                                                 });
                                             }
                                         }),
@@ -1315,6 +1409,7 @@ impl Render for WorkformeTaskView {
                             // Attach/Resume button (for any stage with a session)
                             .when_some(self.task.sessions.get(stage).cloned(), |el, sid| {
                                 let entity_for_attach = entity.clone();
+                                let stage_label_for_attach = stage.label().to_string();
                                 let is_running = matches!(status, StageStatus::InProgress(_));
                                 let label = if is_running { "⏎ Attach" } else { "⏎ Resume" };
                                 let color = if is_running { ui::Color::Warning } else { ui::Color::Default };
@@ -1330,8 +1425,9 @@ impl Render for WorkformeTaskView {
                                         .on_click(move |_event, window, cx| {
                                             if let Some(view) = entity_for_attach.upgrade() {
                                                 let short_id = sid[..8.min(sid.len())].to_string();
+                                                let stage_label = stage_label_for_attach.clone();
                                                 view.update(cx, |view, cx| {
-                                                    view.open_session(&short_id, window, cx);
+                                                    view.open_session(&short_id, &stage_label, window, cx);
                                                 });
                                             }
                                         }),
