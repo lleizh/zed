@@ -1525,7 +1525,61 @@ impl Render for WorkformeTaskView {
                                         .ok();
                                 }),
                         )
-                    }),
+                    })
+                    .when(
+                        matches!(self.task.stages.get(&Stage::Implement), Some(StageStatus::Done))
+                            && !matches!(self.task.stages.get(&Stage::Pr), Some(StageStatus::Done)),
+                        |el| {
+                            let autofix_running = self.work_dir().join(".autofix.pid").exists();
+                            let workforme_root = self.workforme_root.clone();
+                            let task_id = self.task.id.clone();
+                            if autofix_running {
+                                let workforme_root_stop = workforme_root.clone();
+                                let task_id_stop = task_id.clone();
+                                el.child(
+                                    div()
+                                        .id("wfm-action-stop-autofix")
+                                        .px_2()
+                                        .py_0p5()
+                                        .rounded_md()
+                                        .bg(cx.theme().colors().ghost_element_hover)
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(cx.theme().colors().ghost_element_selected))
+                                        .child(Label::new("■ Stop").size(ui::LabelSize::Small).color(ui::Color::Error))
+                                        .on_click(move |_event, _window, _cx| {
+                                            let script = workforme_root_stop.join("scripts/stop-autofix.sh");
+                                            let task_dir = workforme_root_stop.join(".work").join(&task_id_stop);
+                                            std::process::Command::new("bash")
+                                                .arg(&script)
+                                                .arg(&task_dir)
+                                                .spawn()
+                                                .ok();
+                                        }),
+                                )
+                            } else {
+                                el.child(
+                                    div()
+                                        .id("wfm-action-autofix")
+                                        .px_2()
+                                        .py_0p5()
+                                        .rounded_md()
+                                        .bg(cx.theme().colors().ghost_element_hover)
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(cx.theme().colors().ghost_element_selected))
+                                        .child(Label::new("Autofix").size(ui::LabelSize::Small).color(ui::Color::Accent))
+                                        .on_click(move |_event, _window, _cx| {
+                                            let script = workforme_root.join("scripts/autofix.sh");
+                                            let task_dir = workforme_root.join(".work").join(&task_id);
+                                            std::process::Command::new("bash")
+                                                .arg(&script)
+                                                .arg(&task_dir)
+                                                .spawn()
+                                                .ok();
+                                        }),
+                                )
+                            }
+                        },
+                    ),
             )
     }
 }
