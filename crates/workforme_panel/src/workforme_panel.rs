@@ -1072,17 +1072,17 @@ impl WorkformeTaskView {
             other => other,
         };
 
-        // failed/running は retry（stop-agents + reset + run）、それ以外は直接 run
+        // failed/running は redo（stop-agents + reset + run）、それ以外は直接 run
         let stage_enum = Stage::all().iter().find(|s| s.command() == stage_cmd);
-        let needs_retry = stage_enum.map_or(false, |s| {
+        let needs_redo = stage_enum.map_or(false, |s| {
             matches!(
                 self.task.stages.get(s),
                 Some(StageStatus::Failed | StageStatus::InProgress(_))
             )
         });
 
-        let script = if needs_retry {
-            self.workforme_root.join("scripts/retry-stage.sh")
+        let script = if needs_redo {
+            self.workforme_root.join("scripts/redo-stage.sh")
         } else {
             self.workforme_root.join("scripts/run-stage.sh")
         };
@@ -1458,26 +1458,38 @@ impl Render for WorkformeTaskView {
                                         }),
                                 )
                             })
-                            // Fix button (for check/codex-review when done)
+                            // Redo button (for done stages; hidden for plan/pr, and hidden after PR is done unless fixer)
                             .when(
-                                matches!(stage, Stage::Check | Stage::CodexReview) && matches!(status, StageStatus::Done),
+                                matches!(status, StageStatus::Done)
+                                    && !matches!(stage, Stage::Plan | Stage::Pr)
+                                    && (matches!(stage, Stage::Fixer)
+                                        || !matches!(self.task.stages.get(&Stage::Pr), Some(StageStatus::Done))),
                                 |el| {
-                                    let entity_for_fix = entity.clone();
+                                    let stage_cmd_for_redo = stage_cmd.to_string();
+                                    let workforme_root_for_redo = self.workforme_root.clone();
+                                    let task_id_for_redo = self.task.id.clone();
                                     el.child(
                                         div()
-                                            .id(gpui::ElementId::NamedInteger("wfm-fix".into(), i as u64))
+                                            .id(gpui::ElementId::NamedInteger("wfm-redo".into(), i as u64))
                                             .px_2()
                                             .py_0p5()
                                             .rounded_sm()
                                             .cursor_pointer()
                                             .hover(|s| s.bg(cx.theme().colors().ghost_element_hover))
-                                            .child(Label::new("Fix").size(ui::LabelSize::XSmall).color(ui::Color::Warning))
-                                            .on_click(move |_event, window, cx| {
-                                                if let Some(view) = entity_for_fix.upgrade() {
-                                                    view.update(cx, |view, cx| {
-                                                        view.run_stage("fix", window, cx);
-                                                    });
-                                                }
+                                            .child(Label::new("↺ Redo").size(ui::LabelSize::XSmall).color(ui::Color::Muted))
+                                            .on_click(move |_event, _window, _cx| {
+                                                let script = workforme_root_for_redo.join("scripts/redo-stage.sh");
+                                                let task_dir = workforme_root_for_redo.join(".work").join(&task_id_for_redo);
+                                                let stage_name = match stage_cmd_for_redo.as_str() {
+                                                    "impl" => "implement",
+                                                    other => other,
+                                                };
+                                                std::process::Command::new("bash")
+                                                    .arg(&script)
+                                                    .arg(&task_dir)
+                                                    .arg(stage_name)
+                                                    .spawn()
+                                                    .ok();
                                             }),
                                     )
                                 },
