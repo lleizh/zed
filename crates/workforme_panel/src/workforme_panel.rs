@@ -144,6 +144,7 @@ pub struct WorkformeTask {
     task_type: Option<String>,
     url: Option<String>,
     pr_url: Option<String>,
+    pr_number: Option<u64>,
     worktree: Option<String>,
     stages: HashMap<Stage, StageStatus>,
     sessions: HashMap<Stage, String>,
@@ -593,6 +594,7 @@ fn parse_task_dir(task_dir: &Path) -> Option<WorkformeTask> {
         .get("pr_url")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    let pr_number = state_value.get("pr_number").and_then(|v| v.as_u64());
     let date = state_value
         .get("created")
         .and_then(|v| v.as_str())
@@ -679,6 +681,7 @@ fn parse_task_dir(task_dir: &Path) -> Option<WorkformeTask> {
         task_type,
         url,
         pr_url,
+        pr_number,
         worktree,
         stages,
         sessions,
@@ -1578,6 +1581,45 @@ impl Render for WorkformeTaskView {
                                         }),
                                 )
                             }
+                        },
+                    )
+                    // Approve button (for review tasks with pr_number)
+                    .when(
+                        self.task.task_type.as_deref() == Some("review")
+                            && self.task.pr_number.is_some()
+                            && self.task.repo.is_some(),
+                        |el| {
+                            let repo = self.task.repo.clone().unwrap();
+                            let pr_number = self.task.pr_number.unwrap();
+                            let workforme_root = self.workforme_root.clone();
+                            el.child(
+                                div()
+                                    .id("wfm-action-approve")
+                                    .px_2()
+                                    .py_0p5()
+                                    .rounded_md()
+                                    .bg(cx.theme().colors().ghost_element_hover)
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(cx.theme().colors().ghost_element_selected))
+                                    .child(Label::new("✓ Approve").size(ui::LabelSize::Small).color(ui::Color::Success))
+                                    .on_click(move |_event, _window, _cx| {
+                                        let org = std::process::Command::new("python3")
+                                            .arg(workforme_root.join("scripts/state.py"))
+                                            .arg("config")
+                                            .arg("github_org")
+                                            .output()
+                                            .ok()
+                                            .and_then(|o| String::from_utf8(o.stdout).ok())
+                                            .unwrap_or_default()
+                                            .trim()
+                                            .to_string();
+                                        std::process::Command::new("gh")
+                                            .args(["api", &format!("repos/{}/{}/pulls/{}/reviews", org, repo, pr_number),
+                                                   "--method", "POST", "-f", "event=APPROVE", "-f", "body=LGTM"])
+                                            .spawn()
+                                            .ok();
+                                    }),
+                            )
                         },
                     ),
             )
