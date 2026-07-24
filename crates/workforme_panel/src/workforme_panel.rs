@@ -134,6 +134,15 @@ struct DynStage {
     session_id: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+enum PrState {
+    None,
+    Open,
+    Approved,
+    ChangesRequested,
+    Merged,
+}
+
 #[derive(Debug, Clone)]
 pub struct WorkformeTask {
     id: String,
@@ -145,6 +154,7 @@ pub struct WorkformeTask {
     url: Option<String>,
     pr_url: Option<String>,
     pr_number: Option<u64>,
+    pr_state: PrState,
     worktree: Option<String>,
     stages: HashMap<Stage, StageStatus>,
     sessions: HashMap<Stage, String>,
@@ -186,7 +196,7 @@ impl WorkformeTask {
 pub struct WorkformePanel {
     focus_handle: FocusHandle,
     tasks: Vec<WorkformeTask>,
-    collapsed_dates: std::collections::HashSet<String>,
+    collapsed_repos: std::collections::HashSet<String>,
     context_menu: Option<(Entity<ContextMenu>, Point<Pixels>, Subscription)>,
     workforme_root: PathBuf,
     workspace: WeakEntity<Workspace>,
@@ -209,17 +219,33 @@ impl WorkformePanel {
             async move |this: WeakEntity<Self>, cx| {
                 loop {
                     cx.background_executor().timer(POLL_INTERVAL).await;
-                    let work_dir = {
-                        let Ok(result) =
-                            this.update(cx, |panel, _cx| panel.workforme_root.join(".work"))
-                        else {
+                    let (work_dir, cached_states) = {
+                        let Ok(result) = this.update(cx, |panel, _cx| {
+                            let dir = panel.workforme_root.join(".work");
+                            let states: HashMap<String, PrState> = panel
+                                .tasks
+                                .iter()
+                                .filter(|t| t.pr_state != PrState::None)
+                                .map(|t| (t.id.clone(), t.pr_state.clone()))
+                                .collect();
+                            (dir, states)
+                        }) else {
                             break;
                         };
                         result
                     };
                     let tasks = cx
                         .background_executor()
-                        .spawn(async move { load_tasks_from_disk(&work_dir) })
+                        .spawn(async move {
+                            let mut tasks = load_tasks_from_disk(&work_dir);
+                            for task in tasks.iter_mut() {
+                                if let Some(state) = cached_states.get(&task.id) {
+                                    task.pr_state = state.clone();
+                                }
+                            }
+                            check_pr_states(&mut tasks);
+                            tasks
+                        })
                         .await;
                     let result = this.update(cx, |panel, cx| {
                         if panel.tasks != tasks {
@@ -237,7 +263,7 @@ impl WorkformePanel {
         let mut panel = Self {
             focus_handle: cx.focus_handle(),
             tasks: Vec::new(),
-            collapsed_dates: std::collections::HashSet::new(),
+            collapsed_repos: std::collections::HashSet::new(),
             context_menu: None,
             workforme_root,
             workspace,
@@ -250,6 +276,7 @@ impl WorkformePanel {
     fn load_tasks(&mut self) {
         let work_dir = self.workforme_root.join(".work");
         self.tasks = load_tasks_from_disk(&work_dir);
+        check_pr_states(&mut self.tasks);
     }
 
     pub fn reload(&mut self, cx: &mut Context<Self>) {
@@ -387,26 +414,36 @@ impl Render for WorkformePanel {
         let workspace_for_header = self.workspace.clone();
         let workforme_root = self.workforme_root.clone();
 
-        // Group tasks by date (reversed so newest first)
-        let mut dates: Vec<String> = self.tasks.iter().map(|t| t.date.clone()).collect();
-        dates.sort();
-        dates.dedup();
-        dates.reverse();
+        // Group tasks by repository
+        let mut repos: Vec<String> = self
+            .tasks
+            .iter()
+            .map(|t| t.repo.clone().unwrap_or_else(|| "(no repo)".to_string()))
+            .collect();
+        repos.sort();
+        repos.dedup();
 
-        let collapsed = self.collapsed_dates.clone();
+        let collapsed = self.collapsed_repos.clone();
         let entity = cx.entity().downgrade();
 
         let mut date_sections: Vec<gpui::AnyElement> = Vec::new();
         let mut global_index = 0usize;
 
-        for date in &dates {
-            let is_collapsed = collapsed.contains(date);
-            let date_clone = date.clone();
+        for repo in &repos {
+            let is_collapsed = collapsed.contains(repo);
+            let repo_clone = repo.clone();
             let entity_clone = entity.clone();
+            let task_count = self
+                .tasks
+                .iter()
+                .filter(|t| {
+                    t.repo.as_deref().unwrap_or("(no repo)") == repo.as_str()
+                })
+                .count();
 
-            // Date header
+            // Repo header
             let header = h_flex()
-                .id(gpui::ElementId::Name(format!("wfm-date-{}", date).into()))
+                .id(gpui::ElementId::Name(format!("wfm-repo-{}", repo).into()))
                 .px_2()
                 .py_0p5()
                 .cursor_pointer()
@@ -417,17 +454,17 @@ impl Render for WorkformePanel {
                         .color(ui::Color::Muted),
                 )
                 .child(
-                    Label::new(format!(" {}", date))
+                    Label::new(format!(" {} ({})", repo, task_count))
                         .size(ui::LabelSize::Small)
                         .color(ui::Color::Muted),
                 )
                 .on_click(move |_event, _window, cx| {
                     if let Some(panel) = entity_clone.upgrade() {
                         panel.update(cx, |panel, cx| {
-                            if panel.collapsed_dates.contains(&date_clone) {
-                                panel.collapsed_dates.remove(&date_clone);
+                            if panel.collapsed_repos.contains(&repo_clone) {
+                                panel.collapsed_repos.remove(&repo_clone);
                             } else {
-                                panel.collapsed_dates.insert(date_clone.clone());
+                                panel.collapsed_repos.insert(repo_clone.clone());
                             }
                             cx.notify();
                         });
@@ -436,9 +473,20 @@ impl Render for WorkformePanel {
 
             date_sections.push(header.into_any_element());
 
-            // Task rows (if not collapsed)
+            // Task rows (if not collapsed), sorted by date descending
             if !is_collapsed {
-                for task in self.tasks.iter().filter(|t| &t.date == date) {
+                let mut repo_tasks: Vec<&WorkformeTask> = self
+                    .tasks
+                    .iter()
+                    .filter(|t| {
+                        t.repo.as_deref().unwrap_or("(no repo)") == repo.as_str()
+                    })
+                    .collect();
+                repo_tasks.sort_by(|a, b| {
+                    b.date.cmp(&a.date).then_with(|| b.id.cmp(&a.id))
+                });
+
+                for task in repo_tasks {
                     let row = render_task_row(
                         task,
                         global_index,
@@ -451,7 +499,7 @@ impl Render for WorkformePanel {
                     global_index += 1;
                 }
             } else {
-                global_index += self.tasks.iter().filter(|t| &t.date == date).count();
+                global_index += task_count;
             }
         }
 
@@ -563,6 +611,41 @@ fn load_tasks_from_disk(work_dir: &Path) -> Vec<WorkformeTask> {
     tasks
 }
 
+fn check_pr_states(tasks: &mut [WorkformeTask]) {
+    for task in tasks.iter_mut() {
+        if task.pr_state == PrState::Merged {
+            continue;
+        }
+        let (Some(repo), Some(pr_number)) = (task.repo.as_deref(), task.pr_number) else {
+            continue;
+        };
+        let pr_num_str = pr_number.to_string();
+        let repo_full = format!("ajainc/{}", repo);
+        let output = std::process::Command::new("gh")
+            .args([
+                "pr", "view", &pr_num_str,
+                "--repo", &repo_full,
+                "--json", "state,reviewDecision",
+                "-q", "[.state, .reviewDecision] | join(\",\")",
+            ])
+            .output();
+        if let Ok(output) = output {
+            let raw = String::from_utf8_lossy(&output.stdout);
+            let parts: Vec<&str> = raw.trim().split(',').collect();
+            let state = parts.first().copied().unwrap_or("");
+            let review_decision = parts.get(1).copied().unwrap_or("");
+            task.pr_state = match state {
+                "MERGED" => PrState::Merged,
+                _ => match review_decision {
+                    "APPROVED" => PrState::Approved,
+                    "CHANGES_REQUESTED" => PrState::ChangesRequested,
+                    _ => PrState::Open,
+                },
+            };
+        }
+    }
+}
+
 fn parse_task_dir(task_dir: &Path) -> Option<WorkformeTask> {
     let id = task_dir.file_name()?.to_str()?.to_string();
 
@@ -594,7 +677,17 @@ fn parse_task_dir(task_dir: &Path) -> Option<WorkformeTask> {
         .get("pr_url")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
-    let pr_number = state_value.get("pr_number").and_then(|v| v.as_u64());
+    let pr_number = state_value
+        .get("pr_number")
+        .and_then(|v| v.as_u64())
+        .or_else(|| {
+            pr_url
+                .as_deref()?
+                .rsplit('/')
+                .next()?
+                .parse::<u64>()
+                .ok()
+        });
     let date = state_value
         .get("created")
         .and_then(|v| v.as_str())
@@ -682,6 +775,7 @@ fn parse_task_dir(task_dir: &Path) -> Option<WorkformeTask> {
         url,
         pr_url,
         pr_number,
+        pr_state: PrState::None,
         worktree,
         stages,
         sessions,
@@ -780,7 +874,25 @@ fn render_task_row(
             h_flex()
                 .gap_1()
                 .items_center()
-                .child(Label::new(task.title.clone()).size(ui::LabelSize::Default))
+                .when(task.pr_state != PrState::None && task.pr_state != PrState::Open, |el| {
+                    let (label, color) = match &task.pr_state {
+                        PrState::Merged => ("Merged", gpui::rgb(0x8957e5)),
+                        PrState::Approved => ("Approved", gpui::rgb(0x238636)),
+                        PrState::ChangesRequested => ("Changes", gpui::rgb(0xd29922)),
+                        _ => ("", gpui::rgb(0x000000)),
+                    };
+                    el.child(
+                        div()
+                            .px_1()
+                            .rounded_sm()
+                            .bg(color)
+                            .child(
+                                Label::new(label)
+                                    .size(ui::LabelSize::XSmall)
+                                    .color(ui::Color::Default),
+                            ),
+                    )
+                })
                 .when_some(task.task_type.clone(), |el, task_type| {
                     el.child(
                         div()
@@ -793,7 +905,8 @@ fn render_task_row(
                                     .color(ui::Color::Muted),
                             ),
                     )
-                }),
+                })
+                .child(Label::new(task.title.clone()).size(ui::LabelSize::Default)),
         )
         .child(
             h_flex()
@@ -887,6 +1000,7 @@ impl PartialEq for WorkformeTask {
         self.id == other.id
             && self.stages == other.stages
             && self.dynamic_stages == other.dynamic_stages
+            && self.pr_state == other.pr_state
     }
 }
 
@@ -1205,6 +1319,12 @@ impl Render for WorkformeTaskView {
                             // PR row (clickable → open in browser)
                             .when_some(self.task.pr_url.clone(), |el, pr_url| {
                                 let pr_url_clone = pr_url.clone();
+                                let (pr_badge_label, pr_badge_color) = match &self.task.pr_state {
+                                    PrState::Merged => (Some("Merged"), gpui::rgb(0x8957e5)),
+                                    PrState::Approved => (Some("Approved"), gpui::rgb(0x238636)),
+                                    PrState::ChangesRequested => (Some("Changes Requested"), gpui::rgb(0xd29922)),
+                                    _ => (None, gpui::rgb(0x000000)),
+                                };
                                 el.child(
                                     h_flex()
                                         .child(div().w(px(60.)).child(Label::new("PR").size(ui::LabelSize::XSmall).color(ui::Color::Muted)))
@@ -1217,6 +1337,20 @@ impl Render for WorkformeTaskView {
                                                     cx.open_url(&pr_url_clone);
                                                 })
                                         )
+                                        .when_some(pr_badge_label, |el, label| {
+                                            el.child(
+                                                div()
+                                                    .ml_2()
+                                                    .px_1()
+                                                    .rounded_sm()
+                                                    .bg(pr_badge_color)
+                                                    .child(
+                                                        Label::new(label)
+                                                            .size(ui::LabelSize::XSmall)
+                                                            .color(ui::Color::Default),
+                                                    ),
+                                            )
+                                        })
                                 )
                             })
                     ),
@@ -1616,6 +1750,40 @@ impl Render for WorkformeTaskView {
                                         std::process::Command::new("gh")
                                             .args(["api", &format!("repos/{}/{}/pulls/{}/reviews", org, repo, pr_number),
                                                    "--method", "POST", "-f", "event=APPROVE", "-f", "body=LGTM"])
+                                            .spawn()
+                                            .ok();
+                                    }),
+                            )
+                        },
+                    )
+                    // Merge button (for non-review tasks with approved PR)
+                    .when(
+                        self.task.task_type.as_deref() != Some("review")
+                            && self.task.pr_number.is_some()
+                            && self.task.repo.is_some()
+                            && self.task.pr_state == PrState::Approved,
+                        |el| {
+                            let repo = self.task.repo.clone().unwrap();
+                            let pr_number = self.task.pr_number.unwrap();
+                            el.child(
+                                div()
+                                    .id("wfm-action-merge")
+                                    .px_2()
+                                    .py_0p5()
+                                    .rounded_md()
+                                    .bg(cx.theme().colors().ghost_element_hover)
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(cx.theme().colors().ghost_element_selected))
+                                    .child(Label::new("⤵ Merge").size(ui::LabelSize::Small).color(ui::Color::Accent))
+                                    .on_click(move |_event, _window, _cx| {
+                                        std::process::Command::new("gh")
+                                            .args([
+                                                "pr", "merge",
+                                                &pr_number.to_string(),
+                                                "--repo", &format!("ajainc/{}", repo),
+                                                "--squash",
+                                                "--delete-branch",
+                                            ])
                                             .spawn()
                                             .ok();
                                     }),
