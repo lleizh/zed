@@ -211,6 +211,8 @@ pub struct SettingsContent {
 
     pub project_panel: Option<ProjectPanelSettingsContent>,
 
+    pub workforme_panel: Option<WorkformePanelSettingsContent>,
+
     /// Configuration for Node-related features
     pub node: Option<NodeBinarySettings>,
 
@@ -1417,4 +1419,29 @@ impl std::fmt::Display for DelayMs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}ms", self.0)
     }
+}
+
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct WorkformePanelSettingsContent {
+    /// Path to the workforme project root directory.
+    ///
+    /// Default: ~/go/src/github.com/ajainc/workforme
+    pub workforme_root: Option<String>,
+    /// GitHub organization or owner to search for assigned issues and PRs.
+    ///
+    /// Default: ajainc
+    pub github_owner: Option<String>,
+    /// Polling interval in seconds for the workforme panel task list.
+    ///
+    /// Default: 3
+    pub poll_interval_secs: Option<u64>,
+    /// Polling interval in seconds for the my tasks panel.
+    ///
+    /// Default: 60
+    pub my_tasks_poll_interval_secs: Option<u64>,
+    /// Number of days to look back when searching for assigned issues and PRs.
+    ///
+    /// Default: 30
+    pub search_days: Option<u64>,
 }

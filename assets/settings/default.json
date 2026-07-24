@@ -947,6 +947,18 @@
     // Set to 0 to collapse all items that have children, 1 or higher to collapse items at that depth or deeper.
     "expand_outlines_with_depth": 100,
   },
+  "workforme_panel": {
+    // Path to the workforme project root directory.
+    "workforme_root": "~/go/src/github.com/ajainc/workforme",
+    // GitHub organization or owner to search for assigned issues and PRs.
+    "github_owner": "ajainc",
+    // Polling interval in seconds for the workforme panel task list.
+    "poll_interval_secs": 3,
+    // Polling interval in seconds for the my tasks panel.
+    "my_tasks_poll_interval_secs": 60,
+    // Number of days to look back when searching for assigned issues and PRs.
+    "search_days": 30,
+  },
   "collaboration_panel": {
     // Whether to show the collaboration panel button in the status bar.
     "button": true,

@@ -6386,6 +6386,132 @@ fn panels_page() -> SettingsPage {
         ]
     }
 
+    fn workforme_panel_section() -> [SettingsPageItem; 6] {
+        [
+            SettingsPageItem::SectionHeader("Workforme Panel"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Workforme Root",
+                description: "Path to the workforme project root directory.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("workforme_panel.workforme_root"),
+                    pick: |settings_content| {
+                        settings_content
+                            .workforme_panel
+                            .as_ref()?
+                            .workforme_root
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .workforme_panel
+                            .get_or_insert_default()
+                            .workforme_root = value;
+                    },
+                }),
+                metadata: Some(Box::new(SettingsFieldMetadata {
+                    placeholder: Some("~/go/src/github.com/ajainc/workforme"),
+                    ..Default::default()
+                })),
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "GitHub Owner",
+                description:
+                    "GitHub organization or owner to search for assigned issues and PRs.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("workforme_panel.github_owner"),
+                    pick: |settings_content| {
+                        settings_content
+                            .workforme_panel
+                            .as_ref()?
+                            .github_owner
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .workforme_panel
+                            .get_or_insert_default()
+                            .github_owner = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Poll Interval",
+                description: "Polling interval in seconds for the workforme panel task list.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("workforme_panel.poll_interval_secs"),
+                    pick: |settings_content| {
+                        settings_content
+                            .workforme_panel
+                            .as_ref()?
+                            .poll_interval_secs
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .workforme_panel
+                            .get_or_insert_default()
+                            .poll_interval_secs = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "My Tasks Poll Interval",
+                description: "Polling interval in seconds for the my tasks panel.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("workforme_panel.my_tasks_poll_interval_secs"),
+                    pick: |settings_content| {
+                        settings_content
+                            .workforme_panel
+                            .as_ref()?
+                            .my_tasks_poll_interval_secs
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .workforme_panel
+                            .get_or_insert_default()
+                            .my_tasks_poll_interval_secs = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Search Days",
+                description:
+                    "Number of days to look back when searching for assigned issues and PRs.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("workforme_panel.search_days"),
+                    pick: |settings_content| {
+                        settings_content
+                            .workforme_panel
+                            .as_ref()?
+                            .search_days
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .workforme_panel
+                            .get_or_insert_default()
+                            .search_days = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+        ]
+    }
+
     SettingsPage {
         title: "Panels",
         items: concat_sections![
@@ -6396,6 +6522,7 @@ fn panels_page() -> SettingsPage {
             debugger_panel_section(),
             collaboration_panel_section(),
             agent_panel_section(),
+            workforme_panel_section(),
         ],
     }
 }

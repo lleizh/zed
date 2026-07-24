@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Context as _;
@@ -6,6 +7,8 @@ use gpui::{
     Focusable, InteractiveElement, IntoElement, ParentElement, Pixels, Render,
     StatefulInteractiveElement, Styled, Task, WeakEntity, Window, actions, div, px,
 };
+use settings::Settings;
+use workforme_panel::WorkformePanelSettings;
 use ui::{
     ActiveTheme, ButtonCommon, Clickable, FluentBuilder, IconButton, IconName, IconSize, Label,
     LabelCommon, Tooltip, h_flex, v_flex,
@@ -16,7 +19,6 @@ use workspace::{
 };
 
 const MY_TASKS_PANEL_KEY: &str = "MyTasksPanel";
-const POLL_INTERVAL: Duration = Duration::from_secs(60);
 
 actions!(my_tasks_panel, [ToggleFocus]);
 
@@ -40,7 +42,7 @@ pub struct MyTasksPanel {
     items: Vec<GhItem>,
     running: std::collections::HashSet<String>,
     existing_urls: std::collections::HashSet<String>,
-    workspace: WeakEntity<Workspace>,
+    _workspace: WeakEntity<Workspace>,
     _poll_task: Task<()>,
 }
 
@@ -51,10 +53,28 @@ impl MyTasksPanel {
         let poll_task = cx.spawn({
             async move |this: WeakEntity<Self>, cx| {
                 loop {
+                    let (owner, search_days, workforme_root, poll_secs) = {
+                        let Ok(vals) = this.update(cx, |_panel, cx| {
+                            let s = WorkformePanelSettings::get_global(cx);
+                            let root = shellexpand::tilde(&s.workforme_root).to_string();
+                            (
+                                s.github_owner.clone(),
+                                s.search_days,
+                                PathBuf::from(root),
+                                s.my_tasks_poll_interval_secs,
+                            )
+                        }) else {
+                            break;
+                        };
+                        vals
+                    };
                     let (items, existing) = cx
                         .background_executor()
                         .spawn(async move {
-                            (fetch_assigned_items(), load_existing_task_urls())
+                            (
+                                fetch_assigned_items(&owner, search_days),
+                                load_existing_task_urls(&workforme_root),
+                            )
                         })
                         .await;
                     let result = this.update(cx, |panel, cx| {
@@ -68,7 +88,9 @@ impl MyTasksPanel {
                     if result.is_err() {
                         break;
                     }
-                    cx.background_executor().timer(POLL_INTERVAL).await;
+                    cx.background_executor()
+                        .timer(Duration::from_secs(poll_secs))
+                        .await;
                 }
             }
         });
@@ -78,14 +100,16 @@ impl MyTasksPanel {
             items: Vec::new(),
             running: std::collections::HashSet::new(),
             existing_urls: std::collections::HashSet::new(),
-            workspace,
+            _workspace: workspace,
             _poll_task: poll_task,
         }
     }
 
     fn reload(&mut self, cx: &mut Context<Self>) {
-        self.items = fetch_assigned_items();
-        self.existing_urls = load_existing_task_urls();
+        let s = WorkformePanelSettings::get_global(cx);
+        let root = PathBuf::from(shellexpand::tilde(&s.workforme_root).to_string());
+        self.items = fetch_assigned_items(&s.github_owner, s.search_days);
+        self.existing_urls = load_existing_task_urls(&root);
         cx.notify();
     }
 }
@@ -258,7 +282,12 @@ impl Render for MyTasksPanel {
                                                 panel.update(cx, |panel, cx| {
                                                     panel.running.insert(key);
                                                     cx.notify();
-                                                    create_workforme_task(&item, &panel.workspace);
+                                                    let s = WorkformePanelSettings::get_global(cx);
+                                                    let root = PathBuf::from(
+                                                        shellexpand::tilde(&s.workforme_root)
+                                                            .to_string(),
+                                                    );
+                                                    create_workforme_task(&item, &root);
                                                 });
                                             }
                                         })
@@ -329,9 +358,9 @@ impl Render for MyTasksPanel {
     }
 }
 
-fn date_30_days_ago() -> String {
+fn date_n_days_ago(days: u64) -> String {
     let output = std::process::Command::new("date")
-        .args(["-v-30d", "+%Y-%m-%d"])
+        .args([&format!("-v-{}d", days), "+%Y-%m-%d"])
         .output()
         .ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
@@ -339,9 +368,9 @@ fn date_30_days_ago() -> String {
     output
 }
 
-fn fetch_assigned_items() -> Vec<GhItem> {
+fn fetch_assigned_items(owner: &str, search_days: u64) -> Vec<GhItem> {
     let mut items = Vec::new();
-    let since = date_30_days_ago();
+    let since = date_n_days_ago(search_days);
     let created_filter = format!("--created=>={}", since);
 
     // Fetch assigned issues
@@ -350,7 +379,7 @@ fn fetch_assigned_items() -> Vec<GhItem> {
             "search", "issues",
             "--assignee=@me",
             "--state=open",
-            "--owner=ajainc",
+            &format!("--owner={}", owner),
             &created_filter,
             "--json", "repository,number,title,url",
             "--limit", "50",
@@ -397,7 +426,7 @@ fn fetch_assigned_items() -> Vec<GhItem> {
             "search", "prs",
             "--review-requested=@me",
             "--state=open",
-            "--owner=ajainc",
+            &format!("--owner={}", owner),
             &created_filter,
             "--json", "repository,number,title,url",
             "--limit", "50",
@@ -441,10 +470,9 @@ fn fetch_assigned_items() -> Vec<GhItem> {
     items
 }
 
-fn load_existing_task_urls() -> std::collections::HashSet<String> {
+fn load_existing_task_urls(workforme_root: &PathBuf) -> std::collections::HashSet<String> {
     let mut urls = std::collections::HashSet::new();
-    let home = dirs::home_dir().unwrap_or_default();
-    let work_dir = home.join("go/src/github.com/ajainc/workforme/.work");
+    let work_dir = workforme_root.join(".work");
     let Ok(entries) = std::fs::read_dir(&work_dir) else {
         return urls;
     };
@@ -466,10 +494,7 @@ fn load_existing_task_urls() -> std::collections::HashSet<String> {
     urls
 }
 
-fn create_workforme_task(item: &GhItem, _workspace: &WeakEntity<Workspace>) {
-    let home = dirs::home_dir().unwrap_or_default();
-    let workforme_root = home.join("go/src/github.com/ajainc/workforme");
-
+fn create_workforme_task(item: &GhItem, workforme_root: &PathBuf) {
     let script = match item.kind {
         GhItemKind::Issue => "scripts/create-task.sh",
         GhItemKind::PullRequest => "scripts/review-pr.sh",
@@ -477,7 +502,7 @@ fn create_workforme_task(item: &GhItem, _workspace: &WeakEntity<Workspace>) {
 
     std::process::Command::new(workforme_root.join(script))
         .arg(&item.url)
-        .current_dir(&workforme_root)
+        .current_dir(workforme_root)
         .spawn()
         .ok();
 }

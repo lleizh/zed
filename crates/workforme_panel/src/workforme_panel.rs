@@ -22,10 +22,32 @@ use workspace::{
     dock::{DockPosition, Panel, PanelEvent},
     item::{Item, ItemEvent},
 };
+use settings::{RegisterSetting, Settings, SettingsContent};
 use zed_actions::RevealTarget;
 
+#[derive(Debug, Clone, PartialEq, RegisterSetting)]
+pub struct WorkformePanelSettings {
+    pub workforme_root: String,
+    pub github_owner: String,
+    pub poll_interval_secs: u64,
+    pub my_tasks_poll_interval_secs: u64,
+    pub search_days: u64,
+}
+
+impl Settings for WorkformePanelSettings {
+    fn from_settings(content: &SettingsContent) -> Self {
+        let panel = content.workforme_panel.as_ref().unwrap();
+        Self {
+            workforme_root: panel.workforme_root.clone().unwrap(),
+            github_owner: panel.github_owner.clone().unwrap(),
+            poll_interval_secs: panel.poll_interval_secs.unwrap(),
+            my_tasks_poll_interval_secs: panel.my_tasks_poll_interval_secs.unwrap(),
+            search_days: panel.search_days.unwrap(),
+        }
+    }
+}
+
 const WORKFORME_PANEL_KEY: &str = "WorkformePanel";
-const POLL_INTERVAL: Duration = Duration::from_secs(3);
 
 actions!(workforme_panel, [ToggleFocus]);
 
@@ -208,13 +230,10 @@ impl EventEmitter<PanelEvent> for WorkformePanel {}
 
 impl WorkformePanel {
     pub fn new(workspace: WeakEntity<Workspace>, cx: &mut Context<Self>) -> Self {
-        let home = dirs::home_dir().unwrap_or_default();
-        let workforme_root = home
-            .join("go")
-            .join("src")
-            .join("github.com")
-            .join("ajainc")
-            .join("workforme");
+        let settings = WorkformePanelSettings::get_global(cx);
+        let raw_root = settings.workforme_root.clone();
+        let expanded = shellexpand::tilde(&raw_root).to_string();
+        let workforme_root = PathBuf::from(expanded);
 
         let poll_task = cx.spawn({
             async move |this: WeakEntity<Self>, cx| {
@@ -264,7 +283,14 @@ impl WorkformePanel {
                     if result.is_err() {
                         break;
                     }
-                    cx.background_executor().timer(POLL_INTERVAL).await;
+                    let poll_secs = this
+                        .update(cx, |_panel, cx| {
+                            WorkformePanelSettings::get_global(cx).poll_interval_secs
+                        })
+                        .unwrap_or(3);
+                    cx.background_executor()
+                        .timer(Duration::from_secs(poll_secs))
+                        .await;
                 }
             }
         });

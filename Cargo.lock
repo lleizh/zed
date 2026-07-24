@@ -11291,10 +11291,12 @@ name = "my_tasks_panel"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "dirs",
  "gpui",
  "serde_json",
+ "settings",
+ "shellexpand",
  "ui",
+ "workforme_panel",
  "workspace",
  "zed_actions",
 ]
@@ -22708,10 +22710,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "collections",
- "dirs",
  "gpui",
  "log",
  "serde_json",
+ "settings",
+ "shellexpand",
  "task",
  "ui",
  "util",
