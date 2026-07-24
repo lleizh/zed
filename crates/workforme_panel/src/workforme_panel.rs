@@ -197,6 +197,7 @@ pub struct WorkformePanel {
     focus_handle: FocusHandle,
     tasks: Vec<WorkformeTask>,
     collapsed_repos: std::collections::HashSet<String>,
+    deleting_ids: std::collections::HashSet<String>,
     context_menu: Option<(Entity<ContextMenu>, Point<Pixels>, Subscription)>,
     workforme_root: PathBuf,
     workspace: WeakEntity<Workspace>,
@@ -218,7 +219,6 @@ impl WorkformePanel {
         let poll_task = cx.spawn({
             async move |this: WeakEntity<Self>, cx| {
                 loop {
-                    cx.background_executor().timer(POLL_INTERVAL).await;
                     let (work_dir, cached_states) = {
                         let Ok(result) = this.update(cx, |panel, _cx| {
                             let dir = panel.workforme_root.join(".work");
@@ -248,14 +248,23 @@ impl WorkformePanel {
                         })
                         .await;
                     let result = this.update(cx, |panel, cx| {
-                        if panel.tasks != tasks {
-                            panel.tasks = tasks;
+                        let filtered: Vec<WorkformeTask> = tasks
+                            .into_iter()
+                            .filter(|t| !panel.deleting_ids.contains(&t.id))
+                            .collect();
+                        // ID が磁盘上もう存在しなければ deleting_ids からも除去
+                        panel.deleting_ids.retain(|id| {
+                            filtered.iter().any(|t| &t.id == id)
+                        });
+                        if panel.tasks != filtered {
+                            panel.tasks = filtered;
                             cx.notify();
                         }
                     });
                     if result.is_err() {
                         break;
                     }
+                    cx.background_executor().timer(POLL_INTERVAL).await;
                 }
             }
         });
@@ -264,6 +273,7 @@ impl WorkformePanel {
             focus_handle: cx.focus_handle(),
             tasks: Vec::new(),
             collapsed_repos: std::collections::HashSet::new(),
+            deleting_ids: std::collections::HashSet::new(),
             context_menu: None,
             workforme_root,
             workspace,
@@ -276,7 +286,6 @@ impl WorkformePanel {
     fn load_tasks(&mut self) {
         let work_dir = self.workforme_root.join(".work");
         self.tasks = load_tasks_from_disk(&work_dir);
-        check_pr_states(&mut self.tasks);
     }
 
     pub fn reload(&mut self, cx: &mut Context<Self>) {
@@ -373,6 +382,14 @@ impl WorkformePanel {
                         .into_any_element()
                 },
                 move |_window, cx| {
+                    if let Some(panel) = entity_for_delete.upgrade() {
+                        let tid = task_id_for_delete.clone();
+                        panel.update(cx, |panel, cx| {
+                            panel.deleting_ids.insert(tid.clone());
+                            panel.tasks.retain(|t| t.id != tid);
+                            cx.notify();
+                        });
+                    }
                     let task_dir = root_for_delete.join(".work").join(&task_id_for_delete);
                     let script = root_for_delete.join("scripts/delete-task.sh");
                     std::process::Command::new("bash")
@@ -380,12 +397,6 @@ impl WorkformePanel {
                         .arg(&task_dir)
                         .spawn()
                         .ok();
-                    if let Some(panel) = entity_for_delete.upgrade() {
-                        panel.update(cx, |panel, cx| {
-                            panel.load_tasks();
-                            cx.notify();
-                        });
-                    }
                 },
             );
 
@@ -522,6 +533,23 @@ impl Render for WorkformePanel {
                             .color(ui::Color::Muted),
                     )
                     .child(
+                        h_flex()
+                            .gap_1()
+                            .child({
+                                let entity = cx.entity().downgrade();
+                                IconButton::new("wfm-refresh", IconName::ArrowCircle)
+                                    .icon_size(IconSize::Small)
+                                    .tooltip(Tooltip::text("Refresh"))
+                                    .on_click(move |_event, _window, cx| {
+                                        if let Some(panel) = entity.upgrade() {
+                                            panel.update(cx, |panel, cx| {
+                                                panel.deleting_ids.clear();
+                                                panel.reload(cx);
+                                            });
+                                        }
+                                    })
+                            })
+                            .child(
                         IconButton::new("wfm-add-task", IconName::Plus)
                             .icon_size(IconSize::Small)
                             .tooltip(Tooltip::text("New Task"))
@@ -552,6 +580,7 @@ impl Render for WorkformePanel {
                                     });
                                 }
                             }),
+                            ),
                     ),
             )
             .child(
@@ -612,37 +641,58 @@ fn load_tasks_from_disk(work_dir: &Path) -> Vec<WorkformeTask> {
 }
 
 fn check_pr_states(tasks: &mut [WorkformeTask]) {
-    for task in tasks.iter_mut() {
+    // repo/number → task index のマッピング
+    let mut queries: Vec<(usize, String, u64)> = Vec::new();
+    for (i, task) in tasks.iter().enumerate() {
         if task.pr_state == PrState::Merged {
             continue;
         }
-        let (Some(repo), Some(pr_number)) = (task.repo.as_deref(), task.pr_number) else {
+        if let (Some(repo), Some(pr_number)) = (task.repo.as_deref(), task.pr_number) {
+            queries.push((i, repo.to_string(), pr_number));
+        }
+    }
+    if queries.is_empty() {
+        return;
+    }
+
+    // GraphQL で一括取得
+    let mut query_parts = Vec::new();
+    for (idx, (_, repo, pr_number)) in queries.iter().enumerate() {
+        query_parts.push(format!(
+            "pr{idx}: repository(owner: \"ajainc\", name: \"{repo}\") {{ pullRequest(number: {pr_number}) {{ state reviewDecision }} }}"
+        ));
+    }
+    let graphql_query = format!("{{ {} }}", query_parts.join(" "));
+
+    let output = std::process::Command::new("gh")
+        .args(["api", "graphql", "-f", &format!("query={}", graphql_query)])
+        .output();
+
+    let Ok(output) = output else {
+        return;
+    };
+    let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
+        return;
+    };
+    let Some(data) = parsed.get("data") else {
+        return;
+    };
+
+    for (idx, (task_idx, _, _)) in queries.iter().enumerate() {
+        let key = format!("pr{idx}");
+        let Some(pr_data) = data.get(&key).and_then(|r| r.get("pullRequest")) else {
             continue;
         };
-        let pr_num_str = pr_number.to_string();
-        let repo_full = format!("ajainc/{}", repo);
-        let output = std::process::Command::new("gh")
-            .args([
-                "pr", "view", &pr_num_str,
-                "--repo", &repo_full,
-                "--json", "state,reviewDecision",
-                "-q", "[.state, .reviewDecision] | join(\",\")",
-            ])
-            .output();
-        if let Ok(output) = output {
-            let raw = String::from_utf8_lossy(&output.stdout);
-            let parts: Vec<&str> = raw.trim().split(',').collect();
-            let state = parts.first().copied().unwrap_or("");
-            let review_decision = parts.get(1).copied().unwrap_or("");
-            task.pr_state = match state {
-                "MERGED" => PrState::Merged,
-                _ => match review_decision {
-                    "APPROVED" => PrState::Approved,
-                    "CHANGES_REQUESTED" => PrState::ChangesRequested,
-                    _ => PrState::Open,
-                },
-            };
-        }
+        let state = pr_data.get("state").and_then(|v| v.as_str()).unwrap_or("");
+        let review_decision = pr_data.get("reviewDecision").and_then(|v| v.as_str()).unwrap_or("");
+        tasks[*task_idx].pr_state = match state {
+            "MERGED" => PrState::Merged,
+            _ => match review_decision {
+                "APPROVED" => PrState::Approved,
+                "CHANGES_REQUESTED" => PrState::ChangesRequested,
+                _ => PrState::Open,
+            },
+        };
     }
 }
 
@@ -1072,6 +1122,7 @@ pub struct WorkformeTaskView {
     task: WorkformeTask,
     workforme_root: PathBuf,
     workspace: WeakEntity<Workspace>,
+    busy_action: Option<String>,
     _poll_task: Task<()>,
 }
 
@@ -1113,6 +1164,7 @@ impl WorkformeTaskView {
             task,
             workforme_root,
             workspace,
+            busy_action: None,
             _poll_task: poll_task,
         }
     }
@@ -1721,11 +1773,13 @@ impl Render for WorkformeTaskView {
                     .when(
                         self.task.task_type.as_deref() == Some("review")
                             && self.task.pr_number.is_some()
-                            && self.task.repo.is_some(),
+                            && self.task.repo.is_some()
+                            && self.busy_action.as_deref() != Some("approve"),
                         |el| {
                             let repo = self.task.repo.clone().unwrap();
                             let pr_number = self.task.pr_number.unwrap();
                             let workforme_root = self.workforme_root.clone();
+                            let entity = cx.entity().downgrade();
                             el.child(
                                 div()
                                     .id("wfm-action-approve")
@@ -1736,7 +1790,13 @@ impl Render for WorkformeTaskView {
                                     .cursor_pointer()
                                     .hover(|s| s.bg(cx.theme().colors().ghost_element_selected))
                                     .child(Label::new("✓ Approve").size(ui::LabelSize::Small).color(ui::Color::Success))
-                                    .on_click(move |_event, _window, _cx| {
+                                    .on_click(move |_event, _window, cx| {
+                                        if let Some(view) = entity.upgrade() {
+                                            view.update(cx, |view, cx| {
+                                                view.busy_action = Some("approve".to_string());
+                                                cx.notify();
+                                            });
+                                        }
                                         let org = std::process::Command::new("python3")
                                             .arg(workforme_root.join("scripts/state.py"))
                                             .arg("config")
@@ -1756,15 +1816,28 @@ impl Render for WorkformeTaskView {
                             )
                         },
                     )
+                    .when(self.busy_action.as_deref() == Some("approve"), |el| {
+                        el.child(
+                            div()
+                                .id("wfm-action-approve-busy")
+                                .px_2()
+                                .py_0p5()
+                                .rounded_md()
+                                .bg(cx.theme().colors().ghost_element_selected)
+                                .child(Label::new("Approving...").size(ui::LabelSize::Small).color(ui::Color::Muted)),
+                        )
+                    })
                     // Merge button (for non-review tasks with approved PR)
                     .when(
                         self.task.task_type.as_deref() != Some("review")
                             && self.task.pr_number.is_some()
                             && self.task.repo.is_some()
-                            && self.task.pr_state == PrState::Approved,
+                            && self.task.pr_state == PrState::Approved
+                            && self.busy_action.as_deref() != Some("merge"),
                         |el| {
                             let repo = self.task.repo.clone().unwrap();
                             let pr_number = self.task.pr_number.unwrap();
+                            let entity = cx.entity().downgrade();
                             el.child(
                                 div()
                                     .id("wfm-action-merge")
@@ -1775,21 +1848,37 @@ impl Render for WorkformeTaskView {
                                     .cursor_pointer()
                                     .hover(|s| s.bg(cx.theme().colors().ghost_element_selected))
                                     .child(Label::new("⤵ Merge").size(ui::LabelSize::Small).color(ui::Color::Accent))
-                                    .on_click(move |_event, _window, _cx| {
+                                    .on_click(move |_event, _window, cx| {
+                                        if let Some(view) = entity.upgrade() {
+                                            view.update(cx, |view, cx| {
+                                                view.busy_action = Some("merge".to_string());
+                                                cx.notify();
+                                            });
+                                        }
                                         std::process::Command::new("gh")
                                             .args([
                                                 "pr", "merge",
                                                 &pr_number.to_string(),
                                                 "--repo", &format!("ajainc/{}", repo),
                                                 "--squash",
-                                                "--delete-branch",
                                             ])
                                             .spawn()
                                             .ok();
                                     }),
                             )
                         },
-                    ),
+                    )
+                    .when(self.busy_action.as_deref() == Some("merge"), |el| {
+                        el.child(
+                            div()
+                                .id("wfm-action-merge-busy")
+                                .px_2()
+                                .py_0p5()
+                                .rounded_md()
+                                .bg(cx.theme().colors().ghost_element_selected)
+                                .child(Label::new("Merging...").size(ui::LabelSize::Small).color(ui::Color::Muted)),
+                        )
+                    }),
             )
     }
 }

@@ -225,6 +225,7 @@ members = [
     "crates/web_search_providers",
     "crates/which_key",
     "crates/workspace",
+    "crates/my_tasks_panel",
     "crates/workforme_panel",
     "crates/worktree",
     "crates/worktree_benchmarks",
@@ -487,6 +488,7 @@ watch = { path = "crates/watch" }
 web_search = { path = "crates/web_search" }
 web_search_providers = { path = "crates/web_search_providers" }
 workspace = { path = "crates/workspace" }
+my_tasks_panel = { path = "crates/my_tasks_panel" }
 workforme_panel = { path = "crates/workforme_panel" }
 worktree = { path = "crates/worktree" }
 x_ai = { path = "crates/x_ai" }

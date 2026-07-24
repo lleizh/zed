@@ -1,0 +1,22 @@
+[package]
+name = "my_tasks_panel"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/my_tasks_panel.rs"
+doctest = false
+
+[dependencies]
+anyhow.workspace = true
+dirs.workspace = true
+gpui.workspace = true
+serde_json.workspace = true
+ui.workspace = true
+workspace.workspace = true
+zed_actions.workspace = true

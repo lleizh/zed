@@ -772,6 +772,7 @@ fn main() {
         collab_ui::init(&app_state, cx);
         git_ui::init(cx);
         workforme_panel::init(cx);
+        my_tasks_panel::init(cx);
         feedback::init(cx);
         markdown_preview::init(cx);
         csv_preview::init(cx);
