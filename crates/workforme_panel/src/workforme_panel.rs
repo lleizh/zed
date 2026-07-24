@@ -18,9 +18,10 @@ use ui::{
 };
 use util::shell::Shell;
 use workspace::{
-    Workspace,
+    Toast, Workspace,
     dock::{DockPosition, Panel, PanelEvent},
     item::{Item, ItemEvent},
+    notifications::NotificationId,
 };
 use settings::{RegisterSetting, Settings, SettingsContent};
 use zed_actions::RevealTarget;
@@ -32,6 +33,7 @@ pub struct WorkformePanelSettings {
     pub poll_interval_secs: u64,
     pub my_tasks_poll_interval_secs: u64,
     pub search_days: u64,
+    pub notify_on_completion: bool,
 }
 
 impl Settings for WorkformePanelSettings {
@@ -43,6 +45,7 @@ impl Settings for WorkformePanelSettings {
             poll_interval_secs: panel.poll_interval_secs.unwrap(),
             my_tasks_poll_interval_secs: panel.my_tasks_poll_interval_secs.unwrap(),
             search_days: panel.search_days.unwrap(),
+            notify_on_completion: panel.notify_on_completion.unwrap(),
         }
     }
 }
@@ -276,6 +279,35 @@ impl WorkformePanel {
                             filtered.iter().any(|t| &t.id == id)
                         });
                         if panel.tasks != filtered {
+                            // stage 状態変化を検出して通知
+                            let notifications =
+                                detect_stage_completions(&panel.tasks, &filtered);
+                            if !notifications.is_empty() {
+                                let should_notify =
+                                    WorkformePanelSettings::get_global(cx)
+                                        .notify_on_completion;
+                                if should_notify {
+                                    if let Some(ws) = panel.workspace.upgrade() {
+                                        ws.update(cx, |ws, cx| {
+                                            for msg in &notifications {
+                                                ws.show_toast(
+                                                    Toast::new(
+                                                        NotificationId::named(
+                                                            format!("wfm-stage-{}", &msg[..20.min(msg.len())]).into(),
+                                                        ),
+                                                        msg.clone(),
+                                                    )
+                                                    .autohide(),
+                                                    cx,
+                                                );
+                                            }
+                                        });
+                                    }
+                                    for msg in &notifications {
+                                        send_system_notification(msg);
+                                    }
+                                }
+                            }
                             panel.tasks = filtered;
                             cx.notify();
                         }
@@ -646,6 +678,77 @@ impl Render for WorkformePanel {
     }
 }
 
+fn send_system_notification(message: &str) {
+    let escaped = message.replace('\\', "\\\\").replace('"', "\\\"");
+    std::process::Command::new("osascript")
+        .args([
+            "-e",
+            &format!(
+                "display notification \"{}\" with title \"Workforme\"",
+                escaped
+            ),
+        ])
+        .spawn()
+        .ok();
+}
+
+fn detect_stage_completions(
+    old_tasks: &[WorkformeTask],
+    new_tasks: &[WorkformeTask],
+) -> Vec<String> {
+    let mut notifications = Vec::new();
+    for new_task in new_tasks {
+        let Some(old_task) = old_tasks.iter().find(|t| t.id == new_task.id) else {
+            continue;
+        };
+        let short_id = &new_task.id[..8.min(new_task.id.len())];
+        // static stages
+        for (stage, new_status) in &new_task.stages {
+            let old_status = old_task.stages.get(stage);
+            let was_in_progress = matches!(old_status, Some(StageStatus::InProgress(_)));
+            if was_in_progress {
+                match new_status {
+                    StageStatus::Done => {
+                        notifications.push(format!(
+                            "✓ [{}] {} completed",
+                            short_id,
+                            stage.command()
+                        ));
+                    }
+                    StageStatus::Failed => {
+                        notifications.push(format!(
+                            "✗ [{}] {} failed",
+                            short_id,
+                            stage.command()
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // dynamic stages
+        for (i, new_dyn) in new_task.dynamic_stages.iter().enumerate() {
+            let old_dyn = old_task.dynamic_stages.get(i);
+            let was_in_progress =
+                old_dyn.map_or(false, |d| matches!(d.status, StageStatus::InProgress(_)));
+            if was_in_progress {
+                match new_dyn.status {
+                    StageStatus::Done => {
+                        notifications
+                            .push(format!("✓ [{}] {} completed", short_id, new_dyn.label));
+                    }
+                    StageStatus::Failed => {
+                        notifications
+                            .push(format!("✗ [{}] {} failed", short_id, new_dyn.label));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    notifications
+}
+
 fn load_tasks_from_disk(work_dir: &Path) -> Vec<WorkformeTask> {
     let Ok(entries) = std::fs::read_dir(work_dir) else {
         return Vec::new();
@@ -950,25 +1053,6 @@ fn render_task_row(
             h_flex()
                 .gap_1()
                 .items_center()
-                .when(task.pr_state != PrState::None && task.pr_state != PrState::Open, |el| {
-                    let (label, color) = match &task.pr_state {
-                        PrState::Merged => ("Merged", gpui::rgb(0x8957e5)),
-                        PrState::Approved => ("Approved", gpui::rgb(0x238636)),
-                        PrState::ChangesRequested => ("Changes", gpui::rgb(0xd29922)),
-                        _ => ("", gpui::rgb(0x000000)),
-                    };
-                    el.child(
-                        div()
-                            .px_1()
-                            .rounded_sm()
-                            .bg(color)
-                            .child(
-                                Label::new(label)
-                                    .size(ui::LabelSize::XSmall)
-                                    .color(ui::Color::Default),
-                            ),
-                    )
-                })
                 .when_some(task.task_type.clone(), |el, task_type| {
                     el.child(
                         div()
@@ -982,19 +1066,42 @@ fn render_task_row(
                             ),
                     )
                 })
-                .child(Label::new(task.title.clone()).size(ui::LabelSize::Default)),
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .child(
+                            Label::new(task.title.clone())
+                                .size(ui::LabelSize::Default)
+                                .single_line(),
+                        ),
+                )
+                .when(task.pr_state != PrState::None && task.pr_state != PrState::Open, |el| {
+                    let (label, color) = match &task.pr_state {
+                        PrState::Merged => ("Merged", gpui::rgb(0x8957e5)),
+                        PrState::Approved => ("Approved", gpui::rgb(0x238636)),
+                        PrState::ChangesRequested => ("Changes", gpui::rgb(0xd29922)),
+                        _ => ("", gpui::rgb(0x000000)),
+                    };
+                    el.child(
+                        div()
+                            .flex_shrink_0()
+                            .px_1()
+                            .rounded_sm()
+                            .bg(color)
+                            .child(
+                                Label::new(label)
+                                    .size(ui::LabelSize::XSmall)
+                                    .color(ui::Color::Default),
+                            ),
+                    )
+                }),
         )
         .child(
             h_flex()
                 .gap_1()
                 .items_center()
-                .when_some(task.repo.clone(), |el, repo| {
-                    el.child(
-                        Label::new(repo)
-                            .size(ui::LabelSize::XSmall)
-                            .color(ui::Color::Muted),
-                    )
-                })
                 .when(task.uses_dynamic_stages(), |el| {
                     el.child(render_dynamic_badges(&task.dynamic_stages, cx))
                 })
@@ -1168,7 +1275,15 @@ impl WorkformeTaskView {
                     let task_dir = workforme_root.join(".work").join(&task_id);
                     let updated = cx
                         .background_executor()
-                        .spawn(async move { parse_task_dir(&task_dir) })
+                        .spawn(async move {
+                            let mut task = parse_task_dir(&task_dir);
+                            if let Some(ref mut t) = task {
+                                let mut tasks = [t.clone()];
+                                check_pr_states(&mut tasks);
+                                t.pr_state = tasks[0].pr_state.clone();
+                            }
+                            task
+                        })
                         .await;
                     let result = this.update(cx, |view, cx| {
                         if let Some(updated) = updated {
@@ -1252,9 +1367,47 @@ impl WorkformeTaskView {
             show_rerun: false,
             save: SaveStrategy::default(),
         };
+        let toast_label = label.to_string();
         if let Some(ws) = self.workspace.upgrade() {
             ws.update(cx, |ws, cx| {
-                ws.spawn_in_terminal(spawn, window, cx).detach();
+                let task = ws.spawn_in_terminal(spawn, window, cx);
+                let ws_handle = cx.entity().downgrade();
+                cx.spawn(async move |_this, cx| {
+                    let result = task.await;
+                    let message = match result {
+                        Some(Ok(status)) if status.success() => {
+                            format!("✓ {} completed", toast_label)
+                        }
+                        Some(Ok(status)) => {
+                            format!("✗ {} failed (exit {})", toast_label, status)
+                        }
+                        Some(Err(e)) => {
+                            format!("✗ {} error: {}", toast_label, e)
+                        }
+                        None => return,
+                    };
+                    ws_handle
+                        .update(cx, |ws, cx| {
+                            let should_notify =
+                                WorkformePanelSettings::get_global(cx)
+                                    .notify_on_completion;
+                            if should_notify {
+                                ws.show_toast(
+                                    Toast::new(
+                                        NotificationId::named(
+                                            format!("workforme-done-{}", toast_label).into(),
+                                        ),
+                                        message.clone(),
+                                    )
+                                    .autohide(),
+                                    cx,
+                                );
+                                send_system_notification(&message);
+                            }
+                        })
+                        .ok();
+                })
+                .detach();
             });
         }
     }

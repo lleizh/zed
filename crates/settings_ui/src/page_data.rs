@@ -6386,7 +6386,7 @@ fn panels_page() -> SettingsPage {
         ]
     }
 
-    fn workforme_panel_section() -> [SettingsPageItem; 6] {
+    fn workforme_panel_section() -> [SettingsPageItem; 7] {
         [
             SettingsPageItem::SectionHeader("Workforme Panel"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -6504,6 +6504,30 @@ fn panels_page() -> SettingsPage {
                             .workforme_panel
                             .get_or_insert_default()
                             .search_days = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Notify on Completion",
+                description:
+                    "Send a system notification when a stage completes.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("workforme_panel.notify_on_completion"),
+                    pick: |settings_content| {
+                        settings_content
+                            .workforme_panel
+                            .as_ref()?
+                            .notify_on_completion
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .workforme_panel
+                            .get_or_insert_default()
+                            .notify_on_completion = value;
                     },
                 }),
                 metadata: None,

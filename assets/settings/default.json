@@ -958,6 +958,8 @@
     "my_tasks_poll_interval_secs": 60,
     // Number of days to look back when searching for assigned issues and PRs.
     "search_days": 30,
+    // Whether to send a system notification when a stage completes.
+    "notify_on_completion": true,
   },
   "collaboration_panel": {
     // Whether to show the collaboration panel button in the status bar.

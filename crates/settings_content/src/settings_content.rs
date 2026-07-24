@@ -1444,4 +1444,8 @@ pub struct WorkformePanelSettingsContent {
     ///
     /// Default: 30
     pub search_days: Option<u64>,
+    /// Whether to send a system notification (macOS) when a stage completes.
+    ///
+    /// Default: true
+    pub notify_on_completion: Option<bool>,
 }
