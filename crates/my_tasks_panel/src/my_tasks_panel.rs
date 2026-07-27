@@ -758,16 +758,33 @@ fn load_existing_task_urls(workforme_root: &PathBuf) -> std::collections::HashSe
 }
 
 fn create_workforme_task(item: &GhItem, workforme_root: &PathBuf) {
-    let script = match item.kind {
-        GhItemKind::Issue => "scripts/create-task.sh",
-        GhItemKind::PullRequest => "scripts/review-pr.sh",
+    let (workflow_type, first_stage) = match item.kind {
+        GhItemKind::Issue => ("issue-dev", "plan"),
+        GhItemKind::PullRequest => ("pr-review", "review-pr"),
     };
 
-    std::process::Command::new(workforme_root.join(script))
-        .arg(&item.url)
-        .current_dir(workforme_root)
-        .spawn()
-        .ok();
+    let root = workforme_root.clone();
+    let url = item.url.clone();
+    std::thread::spawn(move || {
+        let output = std::process::Command::new(root.join("scripts/create-task.sh"))
+            .arg(workflow_type)
+            .arg(&url)
+            .current_dir(&root)
+            .output();
+        if let Ok(out) = output {
+            if out.status.success() {
+                let task_dir = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !task_dir.is_empty() {
+                    std::process::Command::new(root.join("scripts/run-stage.sh"))
+                        .arg(&task_dir)
+                        .arg(first_stage)
+                        .current_dir(&root)
+                        .spawn()
+                        .ok();
+                }
+            }
+        }
+    });
 }
 
 pub fn init(cx: &mut App) {

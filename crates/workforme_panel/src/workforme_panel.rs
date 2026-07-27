@@ -1420,14 +1420,18 @@ impl WorkformeTaskView {
             other => other,
         };
 
-        // failed/running は redo（stop-agents + reset + run）、それ以外は直接 run
-        let stage_enum = Stage::all().iter().find(|s| s.command() == stage_cmd);
-        let needs_redo = stage_enum.map_or(false, |s| {
+        // failed/running は redo、それ以外は直接 run
+        let needs_redo = if let Some(stage_enum) = Stage::all().iter().find(|s| s.command() == stage_cmd) {
             matches!(
-                self.task.stages.get(s),
+                self.task.stages.get(stage_enum),
                 Some(StageStatus::Failed | StageStatus::InProgress(_))
             )
-        });
+        } else {
+            self.task.dynamic_stages.iter().any(|ds| {
+                ds.key == stage_cmd
+                    && matches!(ds.status, StageStatus::Failed | StageStatus::InProgress(_))
+            })
+        };
 
         let script = if needs_redo {
             self.workforme_root.join("scripts/redo-stage.sh")
@@ -1622,6 +1626,28 @@ impl Render for WorkformeTaskView {
                                         Label::new(status_label).size(ui::LabelSize::XSmall).color(ui::Color::Muted)
                                     )
                                 );
+                            if matches!(dyn_stage.status, StageStatus::NotStarted | StageStatus::Failed) {
+                                let entity_for_run = entity.clone();
+                                let stage_key_for_run = dyn_stage.key.clone();
+                                row = row.child(
+                                    div()
+                                        .id(gpui::ElementId::NamedInteger("wfm-dyn-run".into(), i as u64))
+                                        .px_2()
+                                        .py_0p5()
+                                        .rounded_sm()
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(cx.theme().colors().ghost_element_hover))
+                                        .child(Label::new("▶ Run").size(ui::LabelSize::XSmall).color(ui::Color::Accent))
+                                        .on_click(move |_event, window, cx| {
+                                            if let Some(view) = entity_for_run.upgrade() {
+                                                let stage_key = stage_key_for_run.clone();
+                                                view.update(cx, |view, cx| {
+                                                    view.run_stage(&stage_key, window, cx);
+                                                });
+                                            }
+                                        }),
+                                );
+                            }
                             if let Some(ref sid) = dyn_stage.session_id {
                                 let entity_for_attach = entity.clone();
                                 let sid = sid.clone();
