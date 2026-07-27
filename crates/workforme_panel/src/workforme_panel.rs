@@ -218,8 +218,27 @@ impl WorkformeTask {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PanelTab {
+    IssueDev,
+    PrReview,
+    Analyst,
+}
+
+impl PanelTab {
+    fn label(&self) -> &'static str {
+        match self {
+            PanelTab::IssueDev => "Dev",
+            PanelTab::PrReview => "Review",
+            PanelTab::Analyst => "Analyst",
+        }
+    }
+
+}
+
 pub struct WorkformePanel {
     focus_handle: FocusHandle,
+    active_tab: PanelTab,
     tasks: Vec<WorkformeTask>,
     collapsed_repos: std::collections::HashSet<String>,
     deleting_ids: std::collections::HashSet<String>,
@@ -329,6 +348,7 @@ impl WorkformePanel {
 
         let mut panel = Self {
             focus_handle: cx.focus_handle(),
+            active_tab: PanelTab::IssueDev,
             tasks: Vec::new(),
             collapsed_repos: std::collections::HashSet::new(),
             deleting_ids: std::collections::HashSet::new(),
@@ -477,15 +497,33 @@ impl Focusable for WorkformePanel {
     }
 }
 
+impl WorkformePanel {
+    fn filtered_tasks(&self) -> Vec<&WorkformeTask> {
+        self.tasks
+            .iter()
+            .filter(|t| match self.active_tab {
+                PanelTab::IssueDev => {
+                    t.task_type.as_deref() != Some("review")
+                        && t.task_type.as_deref() != Some("analyst")
+                }
+                PanelTab::PrReview => t.task_type.as_deref() == Some("review"),
+                PanelTab::Analyst => t.task_type.as_deref() == Some("analyst"),
+            })
+            .collect()
+    }
+}
+
 impl Render for WorkformePanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let workspace = self.workspace.clone();
         let workspace_for_header = self.workspace.clone();
         let workforme_root = self.workforme_root.clone();
+        let active_tab = self.active_tab;
+
+        let filtered = self.filtered_tasks();
 
         // Group tasks by repository
-        let mut repos: Vec<String> = self
-            .tasks
+        let mut repos: Vec<String> = filtered
             .iter()
             .map(|t| t.repo.clone().unwrap_or_else(|| "(no repo)".to_string()))
             .collect();
@@ -502,8 +540,7 @@ impl Render for WorkformePanel {
             let is_collapsed = collapsed.contains(repo);
             let repo_clone = repo.clone();
             let entity_clone = entity.clone();
-            let task_count = self
-                .tasks
+            let task_count = filtered
                 .iter()
                 .filter(|t| {
                     t.repo.as_deref().unwrap_or("(no repo)") == repo.as_str()
@@ -544,12 +581,12 @@ impl Render for WorkformePanel {
 
             // Task rows (if not collapsed), sorted by date descending
             if !is_collapsed {
-                let mut repo_tasks: Vec<&WorkformeTask> = self
-                    .tasks
+                let mut repo_tasks: Vec<&WorkformeTask> = filtered
                     .iter()
                     .filter(|t| {
                         t.repo.as_deref().unwrap_or("(no repo)") == repo.as_str()
                     })
+                    .copied()
                     .collect();
                 repo_tasks.sort_by(|a, b| {
                     b.date.cmp(&a.date).then_with(|| b.id.cmp(&a.id))
@@ -586,9 +623,37 @@ impl Render for WorkformePanel {
                     .border_color(cx.theme().colors().border)
                     .justify_between()
                     .child(
-                        Label::new("Workforme")
-                            .size(ui::LabelSize::Small)
-                            .color(ui::Color::Muted),
+                        h_flex()
+                            .gap_2()
+                            .children([PanelTab::IssueDev, PanelTab::PrReview, PanelTab::Analyst].iter().map(|tab| {
+                                let tab = *tab;
+                                let entity = cx.entity().downgrade();
+                                div()
+                                    .id(gpui::ElementId::Name(format!("wfm-tab-{}", tab.label()).into()))
+                                    .cursor_pointer()
+                                    .px_1()
+                                    .when(active_tab == tab, |el| {
+                                        el.border_b_2()
+                                            .border_color(cx.theme().colors().text)
+                                    })
+                                    .child(
+                                        Label::new(tab.label())
+                                            .size(ui::LabelSize::Small)
+                                            .color(if active_tab == tab {
+                                                ui::Color::Default
+                                            } else {
+                                                ui::Color::Muted
+                                            }),
+                                    )
+                                    .on_click(move |_event, _window, cx| {
+                                        if let Some(panel) = entity.upgrade() {
+                                            panel.update(cx, |panel, cx| {
+                                                panel.active_tab = tab;
+                                                cx.notify();
+                                            });
+                                        }
+                                    })
+                            }))
                     )
                     .child(
                         h_flex()
