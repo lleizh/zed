@@ -1118,12 +1118,56 @@ pub async fn load(
 
 // --- WorkformeTaskView: Rich view for task details ---
 
+#[derive(Debug, Clone, PartialEq)]
+struct ReviewFindings {
+    verdict: String,
+    items: Vec<ReviewFinding>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ReviewFinding {
+    severity: String,
+    text: String,
+}
+
+fn parse_review_findings(path: &Path) -> Option<ReviewFindings> {
+    let json_path = path.with_file_name("review-pr-findings.json");
+    let content = std::fs::read_to_string(&json_path).ok()?;
+    let val = serde_json::from_str::<serde_json::Value>(&content).ok()?;
+
+    let verdict = val.get("verdict").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let mut items = Vec::new();
+    for (severity, key) in [("critical", "critical"), ("informational", "informational")] {
+        if let Some(arr) = val.get(key).and_then(|v| v.as_array()) {
+            for item in arr {
+                let file = item.get("file").and_then(|v| v.as_str()).unwrap_or("");
+                let line = item.get("line").and_then(|v| v.as_u64()).unwrap_or(0);
+                let text = item.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                let location = if !file.is_empty() && line > 0 {
+                    format!("[{}:{}] ", file, line)
+                } else if !file.is_empty() {
+                    format!("[{}] ", file)
+                } else {
+                    String::new()
+                };
+                items.push(ReviewFinding {
+                    severity: severity.to_string(),
+                    text: format!("{}{}", location, text),
+                });
+            }
+        }
+    }
+    Some(ReviewFindings { verdict, items })
+}
+
 pub struct WorkformeTaskView {
     focus_handle: FocusHandle,
     task: WorkformeTask,
     workforme_root: PathBuf,
     workspace: WeakEntity<Workspace>,
     busy_action: Option<String>,
+    review_findings: Option<ReviewFindings>,
+    expanded_findings: std::collections::HashSet<usize>,
     _poll_task: Task<()>,
 }
 
@@ -1168,12 +1212,18 @@ impl WorkformeTaskView {
             }
         });
 
+        let review_findings = parse_review_findings(
+            &workforme_root.join(".work").join(&task.id).join("review-pr.md"),
+        );
+
         Self {
             focus_handle: cx.focus_handle(),
             task,
             workforme_root,
             workspace,
             busy_action: None,
+            review_findings,
+            expanded_findings: std::collections::HashSet::new(),
             _poll_task: poll_task,
         }
     }
@@ -1623,6 +1673,187 @@ impl Render for WorkformeTaskView {
 
                         connector.into_iter().chain(std::iter::once(row.into_any_element()))
                     }))
+            })
+            // Review findings (pr-review workflow only)
+            .when(self.review_findings.as_ref().map_or(false, |r| !r.items.is_empty()), |el| {
+                let review = self.review_findings.as_ref().unwrap();
+                let entity = cx.entity().downgrade();
+                let (verdict_label, verdict_color) = match review.verdict.as_str() {
+                    "APPROVE" => ("APPROVE", ui::Color::Success),
+                    "REQUEST_CHANGES" => ("REQUEST_CHANGES", ui::Color::Error),
+                    _ => ("COMMENT", ui::Color::Warning),
+                };
+                el.child(div().h(px(1.)).bg(cx.theme().colors().border))
+                    .child(
+                        v_flex()
+                            .py_2()
+                            .px_2()
+                            .gap_1()
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(
+                                        Label::new("Review Findings")
+                                            .size(ui::LabelSize::Small)
+                                            .color(ui::Color::Default),
+                                    )
+                                    .child(
+                                        Label::new(verdict_label)
+                                            .size(ui::LabelSize::XSmall)
+                                            .color(verdict_color),
+                                    ),
+                            )
+                            .children(review.items.iter().enumerate().map(|(i, finding)| {
+                                let severity_color = if finding.severity == "critical" {
+                                    ui::Color::Error
+                                } else {
+                                    ui::Color::Warning
+                                };
+                                let severity_label = if finding.severity == "critical" {
+                                    "C"
+                                } else {
+                                    "I"
+                                };
+                                let is_expanded = self.expanded_findings.contains(&i);
+                                let finding_text = finding.text.clone();
+                                let repo = self.task.repo.clone().unwrap_or_default();
+                                let pr_number = self.task.pr_number.unwrap_or(0);
+                                let workforme_root = self.workforme_root.clone();
+                                let entity_clone = entity.clone();
+                                let entity_for_toggle = entity.clone();
+
+                                // 摘要: [file:line] 部分を抽出、なければ先頭 60 文字
+                                let summary_line = if finding_text.starts_with('[') {
+                                    finding_text.split(']').next()
+                                        .map(|s| format!("{}]", s))
+                                        .unwrap_or_else(|| finding_text.chars().take(60).collect())
+                                } else {
+                                    finding_text.chars().take(60).collect::<String>()
+                                };
+
+                                v_flex()
+                                    .id(gpui::ElementId::NamedInteger("wfm-finding".into(), i as u64))
+                                    .py_0p5()
+                                    .gap_0p5()
+                                    .child(
+                                        h_flex()
+                                            .id(gpui::ElementId::NamedInteger("wfm-finding-row".into(), i as u64))
+                                            .gap_1()
+                                            .items_center()
+                                            .cursor_pointer()
+                                            .hover(|s| s.bg(cx.theme().colors().ghost_element_hover))
+                                            .on_click(move |_event, _window, cx| {
+                                                if let Some(view) = entity_for_toggle.upgrade() {
+                                                    view.update(cx, |view, cx| {
+                                                        if view.expanded_findings.contains(&i) {
+                                                            view.expanded_findings.remove(&i);
+                                                        } else {
+                                                            view.expanded_findings.insert(i);
+                                                        }
+                                                        cx.notify();
+                                                    });
+                                                }
+                                            })
+                                            .child(
+                                                Label::new(if is_expanded { "▼" } else { "▶" })
+                                                    .size(ui::LabelSize::XSmall)
+                                                    .color(ui::Color::Muted),
+                                            )
+                                            .child(
+                                                div()
+                                                    .px_1()
+                                                    .rounded_sm()
+                                                    .child(
+                                                        Label::new(severity_label)
+                                                            .size(ui::LabelSize::XSmall)
+                                                            .color(severity_color),
+                                                    ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .overflow_hidden()
+                                                    .child(
+                                                        Label::new(summary_line)
+                                                            .size(ui::LabelSize::XSmall)
+                                                            .color(ui::Color::Default)
+                                                            .single_line(),
+                                                    ),
+                                            ),
+                                    )
+                                    .when(is_expanded, |el| {
+                                        el.child(
+                                            v_flex()
+                                                .pl_4()
+                                                .gap_1()
+                                                .child(
+                                                    div()
+                                                        .id(gpui::ElementId::NamedInteger("wfm-finding-body".into(), i as u64))
+                                                        .px_2()
+                                                        .py_1()
+                                                        .rounded_md()
+                                                        .bg(cx.theme().colors().surface_background)
+                                                        .max_h(px(120.))
+                                                        .overflow_y_scroll()
+                                                        .child(
+                                                            Label::new(finding_text.clone())
+                                                                .size(ui::LabelSize::XSmall)
+                                                                .color(ui::Color::Default),
+                                                        ),
+                                                )
+                                                .when(pr_number > 0, |el| {
+                                                    el.child(
+                                                        div()
+                                                            .id(gpui::ElementId::NamedInteger("wfm-finding-post".into(), i as u64))
+                                                            .px_2()
+                                                            .py_0p5()
+                                                            .rounded_sm()
+                                                            .cursor_pointer()
+                                                            .bg(cx.theme().colors().ghost_element_hover)
+                                                            .hover(|s| s.bg(cx.theme().colors().ghost_element_selected))
+                                                            .child(
+                                                                Label::new("Post to PR")
+                                                                    .size(ui::LabelSize::XSmall)
+                                                                    .color(ui::Color::Accent),
+                                                            )
+                                                            .on_click(move |_event, _window, cx| {
+                                                                let org = std::process::Command::new("python3")
+                                                                    .arg(workforme_root.join("scripts/state.py"))
+                                                                    .arg("config")
+                                                                    .arg("github_org")
+                                                                    .output()
+                                                                    .ok()
+                                                                    .and_then(|o| String::from_utf8(o.stdout).ok())
+                                                                    .unwrap_or_default()
+                                                                    .trim()
+                                                                    .to_string();
+                                                                std::process::Command::new("gh")
+                                                                    .args([
+                                                                        "api",
+                                                                        &format!("repos/{}/{}/issues/{}/comments", org, repo, pr_number),
+                                                                        "--method", "POST",
+                                                                        "-f", &format!("body={}", finding_text),
+                                                                    ])
+                                                                    .spawn()
+                                                                    .ok();
+                                                                if let Some(view) = entity_clone.upgrade() {
+                                                                    view.update(cx, |view, cx| {
+                                                                        if let Some(ref mut r) = view.review_findings {
+                                                                            r.items.retain(|f| f.text != finding_text);
+                                                                        }
+                                                                        cx.notify();
+                                                                    });
+                                                                }
+                                                            }),
+                                                    )
+                                                }),
+                                        )
+                                    })
+                                    .into_any_element()
+                            })),
+                    )
             })
             // Divider
             .child(div().h(px(1.)).bg(cx.theme().colors().border))

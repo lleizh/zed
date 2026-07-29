@@ -74,7 +74,8 @@ impl MyTasksPanel {
     pub fn new(workspace: WeakEntity<Workspace>, cx: &mut Context<Self>) -> Self {
         let poll_task = cx.spawn({
             async move |this: WeakEntity<Self>, cx| {
-                let mut ticks_since_sync: u64 = 3600; // 初回は即 sync
+                let mut ticks_since_data_sync: u64 = 60; // 初回は即 sync
+                let mut ticks_since_summary_sync: u64 = 3600; // 初回は即 sync
                 loop {
                     let (workforme_root, poll_secs) = {
                         let Ok(vals) = this.update(cx, |_panel, cx| {
@@ -87,15 +88,32 @@ impl MyTasksPanel {
                         vals
                     };
 
-                    // 1 時間（3600 秒）ごとに sync-inbox.sh を実行（平日 9-20 時のみ）
-                    ticks_since_sync += poll_secs;
-                    if ticks_since_sync >= 3600 {
-                        ticks_since_sync = 0;
+                    // 60 秒ごとに sync-inbox.sh（データ取得、スクリプトのみ）
+                    ticks_since_data_sync += poll_secs;
+                    if ticks_since_data_sync >= 60 {
+                        ticks_since_data_sync = 0;
                         let root = workforme_root.clone();
                         cx.background_executor()
                             .spawn(async move {
                                 if is_working_hours() {
                                     std::process::Command::new(root.join("scripts/sync-inbox.sh"))
+                                        .current_dir(&root)
+                                        .output()
+                                        .ok();
+                                }
+                            })
+                            .await;
+                    }
+
+                    // 1 時間ごとに sync-inbox-summary.sh（agent で summary 生成）
+                    ticks_since_summary_sync += poll_secs;
+                    if ticks_since_summary_sync >= 3600 {
+                        ticks_since_summary_sync = 0;
+                        let root = workforme_root.clone();
+                        cx.background_executor()
+                            .spawn(async move {
+                                if is_working_hours() {
+                                    std::process::Command::new(root.join("scripts/sync-inbox-summary.sh"))
                                         .current_dir(&root)
                                         .output()
                                         .ok();
@@ -134,14 +152,19 @@ impl MyTasksPanel {
             }
         });
 
+        let settings = WorkformePanelSettings::get_global(cx);
+        let init_root = PathBuf::from(shellexpand::tilde(&settings.workforme_root).to_string());
+        let (init_items, init_updated_at) = load_inbox(&init_root);
+        let init_existing = load_existing_task_urls(&init_root);
+
         Self {
             focus_handle: cx.focus_handle(),
             active_tab: PanelTab::Mine,
-            items: Vec::new(),
+            items: init_items,
             running: std::collections::HashSet::new(),
-            existing_urls: std::collections::HashSet::new(),
+            existing_urls: init_existing,
             syncing: false,
-            updated_at: None,
+            updated_at: init_updated_at,
             _workspace: workspace,
             _poll_task: poll_task,
         }
