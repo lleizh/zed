@@ -80,16 +80,16 @@ impl MyTasksPanel {
                 let mut ticks_since_data_sync: u64 = 60; // 初回は即 sync
                 let mut ticks_since_summary_sync: u64 = 3600; // 初回は即 sync
                 loop {
-                    let (workforme_root, poll_secs) = {
-                        let Ok(vals) = this.update(cx, |_panel, cx| {
+                    let workforme_root = {
+                        let Ok(root) = this.update(cx, |_panel, cx| {
                             let s = WorkformePanelSettings::get_global(cx);
-                            let root = shellexpand::tilde(&s.workforme_root).to_string();
-                            (PathBuf::from(root), s.my_tasks_poll_interval_secs)
+                            PathBuf::from(shellexpand::tilde(&s.workforme_root).to_string())
                         }) else {
                             break;
                         };
-                        vals
+                        root
                     };
+                    let poll_secs: u64 = 3;
 
                     // 60 秒ごとに sync-inbox.sh（データ取得、スクリプトのみ）
                     ticks_since_data_sync += poll_secs;

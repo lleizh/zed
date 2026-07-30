@@ -1185,21 +1185,7 @@ fn submit_review(
         .unwrap_or_default();
     if let Some(view) = entity.upgrade() {
         view.update(cx, |view, cx| {
-            view.review_submitted = true;
-            if let Some(ref mut findings) = view.review_findings {
-                for item in findings.items.iter_mut() {
-                    if item.selected {
-                        item.posted = true;
-                        item.selected = false;
-                    }
-                }
-            }
-            view.task.pr_state = match event {
-                "APPROVE" => PrState::Approved,
-                "REQUEST_CHANGES" => PrState::ChangesRequested,
-                "COMMENT" => PrState::Commented,
-                _ => view.task.pr_state.clone(),
-            };
+            view.busy_action = Some("submit_review".to_string());
             cx.notify();
         });
     }
@@ -1328,7 +1314,53 @@ fn submit_review(
                 }
             }
         }
+        // inbox.json の review_state を更新
+        update_inbox_review_state(&root, &repo, pr_number, &event);
     });
+}
+
+fn update_inbox_review_state(workforme_root: &Path, repo: &str, pr_number: u64, event: &str) {
+    let review_state = match event {
+        "APPROVE" => "approved",
+        "REQUEST_CHANGES" => "changes_requested",
+        "COMMENT" => "commented",
+        _ => return,
+    };
+    let inbox_path = workforme_root.join(".work/inbox.json");
+    let Ok(content) = std::fs::read_to_string(&inbox_path) else { return };
+    let Ok(mut data) = serde_json::from_str::<serde_json::Value>(&content) else { return };
+    if let Some(items) = data.get_mut("items").and_then(|v| v.as_array_mut()) {
+        for item in items.iter_mut() {
+            let r = item.get("repo").and_then(|v| v.as_str()).unwrap_or("");
+            let n = item.get("number").and_then(|v| v.as_u64()).unwrap_or(0);
+            if r == repo && n == pr_number {
+                item["review_state"] = serde_json::Value::String(review_state.to_string());
+                break;
+            }
+        }
+    }
+    if let Ok(json) = serde_json::to_string_pretty(&data) {
+        std::fs::write(&inbox_path, json).ok();
+    }
+}
+
+fn update_inbox_pr_state(workforme_root: &Path, repo: &str, pr_number: u64, state: &str) {
+    let inbox_path = workforme_root.join(".work/inbox.json");
+    let Ok(content) = std::fs::read_to_string(&inbox_path) else { return };
+    let Ok(mut data) = serde_json::from_str::<serde_json::Value>(&content) else { return };
+    if let Some(items) = data.get_mut("items").and_then(|v| v.as_array_mut()) {
+        for item in items.iter_mut() {
+            let r = item.get("repo").and_then(|v| v.as_str()).unwrap_or("");
+            let n = item.get("number").and_then(|v| v.as_u64()).unwrap_or(0);
+            if r == repo && n == pr_number {
+                item["state"] = serde_json::Value::String(state.to_string());
+                break;
+            }
+        }
+    }
+    if let Ok(json) = serde_json::to_string_pretty(&data) {
+        std::fs::write(&inbox_path, json).ok();
+    }
 }
 
 fn parse_review_findings(task_dir: &Path) -> Option<ReviewFindings> {
@@ -1407,12 +1439,19 @@ impl WorkformeTaskView {
                         })
                         .await;
                     let result = this.update(cx, |view, cx| {
-                        if let Some(mut updated) = updated {
-                            // optimistic update を保護：submit 後は pr_state を上書きしない
-                            if view.review_submitted {
-                                updated.pr_state = view.task.pr_state.clone();
-                            }
+                        if let Some(updated) = updated {
                             if view.task != updated {
+                                // 状態が変わったら busy_action をクリア
+                                if view.busy_action.is_some() {
+                                    view.busy_action = None;
+                                }
+                                // review_posted が変わったら review_submitted + findings を更新
+                                if updated.review_posted && !view.review_submitted {
+                                    view.review_submitted = true;
+                                    view.review_findings = parse_review_findings(
+                                        &view.workforme_root.join(".work").join(&updated.id),
+                                    );
+                                }
                                 view.task = updated;
                                 cx.notify();
                             }
@@ -2066,7 +2105,14 @@ impl Render for WorkformeTaskView {
                                     .into_any_element()
                             }))
                             // Submit bar
-                            .when(has_selected && !submitted, |el| {
+                            .when(self.busy_action.as_deref() == Some("submit_review"), |el| {
+                                el.child(
+                                    Label::new("Submitting...")
+                                        .size(ui::LabelSize::XSmall)
+                                        .color(ui::Color::Muted),
+                                )
+                            })
+                            .when(has_selected && !submitted && self.busy_action.as_deref() != Some("submit_review"), |el| {
                                 let repo = self.task.repo.clone().unwrap_or_default();
                                 let pr_number = self.task.pr_number.unwrap_or(0);
                                 let workforme_root = self.workforme_root.clone();
@@ -2251,6 +2297,7 @@ impl Render for WorkformeTaskView {
                         self.task.task_type.as_deref() == Some("review")
                             && self.task.pr_number.is_some()
                             && self.task.repo.is_some()
+                            && self.task.pr_state != PrState::Approved
                             && self.busy_action.as_deref() != Some("approve"),
                         |el| {
                             let repo = self.task.repo.clone().unwrap();
@@ -2274,21 +2321,31 @@ impl Render for WorkformeTaskView {
                                                 cx.notify();
                                             });
                                         }
-                                        let org = std::process::Command::new("python3")
-                                            .arg(workforme_root.join("scripts/state.py"))
-                                            .arg("config")
-                                            .arg("github_org")
-                                            .output()
-                                            .ok()
-                                            .and_then(|o| String::from_utf8(o.stdout).ok())
-                                            .unwrap_or_default()
-                                            .trim()
-                                            .to_string();
-                                        std::process::Command::new("gh")
-                                            .args(["api", &format!("repos/{}/{}/pulls/{}/reviews", org, repo, pr_number),
-                                                   "--method", "POST", "-f", "event=APPROVE", "-f", "body=LGTM"])
-                                            .spawn()
-                                            .ok();
+                                        let workforme_root_clone = workforme_root.clone();
+                                        let repo_clone = repo.clone();
+                                        std::thread::spawn(move || {
+                                            let org = std::process::Command::new("python3")
+                                                .arg(workforme_root_clone.join("scripts/state.py"))
+                                                .arg("config")
+                                                .arg("github_org")
+                                                .output()
+                                                .ok()
+                                                .and_then(|o| String::from_utf8(o.stdout).ok())
+                                                .unwrap_or_default()
+                                                .trim()
+                                                .to_string();
+                                            let result = std::process::Command::new("gh")
+                                                .args(["api", &format!("repos/{}/{}/pulls/{}/reviews", org, repo_clone, pr_number),
+                                                       "--method", "POST", "-f", "event=APPROVE", "-f", "body=LGTM"])
+                                                .output();
+                                            if let Ok(output) = result {
+                                                if output.status.success() {
+                                                    update_inbox_review_state(&workforme_root_clone, &repo_clone, pr_number, "APPROVE");
+                                                } else {
+                                                    log::error!("workforme: approve failed: {}", String::from_utf8_lossy(&output.stderr));
+                                                }
+                                            }
+                                        });
                                     }),
                             )
                         },
@@ -2314,6 +2371,7 @@ impl Render for WorkformeTaskView {
                         |el| {
                             let repo = self.task.repo.clone().unwrap();
                             let pr_number = self.task.pr_number.unwrap();
+                            let workforme_root = self.workforme_root.clone();
                             let entity = cx.entity().downgrade();
                             el.child(
                                 div()
@@ -2332,15 +2390,25 @@ impl Render for WorkformeTaskView {
                                                 cx.notify();
                                             });
                                         }
-                                        std::process::Command::new("gh")
-                                            .args([
-                                                "pr", "merge",
-                                                &pr_number.to_string(),
-                                                "--repo", &format!("ajainc/{}", repo),
-                                                "--squash",
-                                            ])
-                                            .spawn()
-                                            .ok();
+                                        let workforme_root_clone = workforme_root.clone();
+                                        let repo_clone = repo.clone();
+                                        std::thread::spawn(move || {
+                                            let result = std::process::Command::new("gh")
+                                                .args([
+                                                    "pr", "merge",
+                                                    &pr_number.to_string(),
+                                                    "--repo", &format!("ajainc/{}", repo_clone),
+                                                    "--squash",
+                                                ])
+                                                .output();
+                                            if let Ok(output) = result {
+                                                if output.status.success() {
+                                                    update_inbox_pr_state(&workforme_root_clone, &repo_clone, pr_number, "merged");
+                                                } else {
+                                                    log::error!("workforme: merge failed: {}", String::from_utf8_lossy(&output.stderr));
+                                                }
+                                            }
+                                        });
                                     }),
                             )
                         },
