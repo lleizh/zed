@@ -96,6 +96,7 @@ enum PrState {
     Open,
     Approved,
     ChangesRequested,
+    Commented,
     Merged,
 }
 
@@ -111,6 +112,7 @@ pub struct WorkformeTask {
     pr_url: Option<String>,
     pr_number: Option<u64>,
     pr_state: PrState,
+    review_posted: bool,
     worktree: Option<String>,
     dynamic_stages: Vec<DynStage>,
 }
@@ -174,31 +176,19 @@ impl WorkformePanel {
         let poll_task = cx.spawn({
             async move |this: WeakEntity<Self>, cx| {
                 loop {
-                    let (work_dir, cached_states) = {
-                        let Ok(result) = this.update(cx, |panel, _cx| {
-                            let dir = panel.workforme_root.join(".work");
-                            let states: HashMap<String, PrState> = panel
-                                .tasks
-                                .iter()
-                                .filter(|t| t.pr_state != PrState::None)
-                                .map(|t| (t.id.clone(), t.pr_state.clone()))
-                                .collect();
-                            (dir, states)
+                    let work_dir = {
+                        let Ok(dir) = this.update(cx, |panel, _cx| {
+                            panel.workforme_root.join(".work")
                         }) else {
                             break;
                         };
-                        result
+                        dir
                     };
                     let tasks = cx
                         .background_executor()
                         .spawn(async move {
                             let mut tasks = load_tasks_from_disk(&work_dir);
-                            for task in tasks.iter_mut() {
-                                if let Some(state) = cached_states.get(&task.id) {
-                                    task.pr_state = state.clone();
-                                }
-                            }
-                            check_pr_states(&mut tasks);
+                            check_pr_states(&mut tasks, &work_dir);
                             tasks
                         })
                         .await;
@@ -465,7 +455,10 @@ impl Render for WorkformePanel {
             let header = h_flex()
                 .id(gpui::ElementId::Name(format!("wfm-repo-{}", repo).into()))
                 .px_2()
-                .py_0p5()
+                .py_1()
+                .mt_1()
+                .border_b_1()
+                .border_color(cx.theme().colors().border)
                 .cursor_pointer()
                 .hover(|s| s.bg(cx.theme().colors().ghost_element_hover))
                 .child(
@@ -476,7 +469,7 @@ impl Render for WorkformePanel {
                 .child(
                     Label::new(format!(" {} ({})", repo, task_count))
                         .size(ui::LabelSize::Small)
-                        .color(ui::Color::Muted),
+                        .color(ui::Color::Default),
                 )
                 .on_click(move |_event, _window, cx| {
                     if let Some(panel) = entity_clone.upgrade() {
@@ -723,59 +716,86 @@ fn load_tasks_from_disk(work_dir: &Path) -> Vec<WorkformeTask> {
     tasks
 }
 
-fn check_pr_states(tasks: &mut [WorkformeTask]) {
-    // repo/number → task index のマッピング
-    let mut queries: Vec<(usize, String, u64)> = Vec::new();
-    for (i, task) in tasks.iter().enumerate() {
+fn check_pr_states(tasks: &mut [WorkformeTask], work_dir: &Path) {
+    let inbox_path = work_dir.join("inbox.json");
+    let Ok(content) = std::fs::read_to_string(&inbox_path) else {
+        return;
+    };
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return;
+    };
+    let Some(items) = parsed.get("items").and_then(|v| v.as_array()) else {
+        return;
+    };
+
+    // repo/number → review_state + state
+    let mut inbox_map: HashMap<(String, u64), (&str, &str)> = HashMap::new();
+    for item in items {
+        let repo = item.get("repo").and_then(|v| v.as_str()).unwrap_or("");
+        let number = item.get("number").and_then(|v| v.as_u64()).unwrap_or(0);
+        let review_state = item.get("review_state").and_then(|v| v.as_str()).unwrap_or("");
+        let state = item.get("state").and_then(|v| v.as_str()).unwrap_or("open");
+        if number > 0 {
+            inbox_map.insert((repo.to_string(), number), (review_state, state));
+        }
+    }
+
+    let mut fallback_queries: Vec<(usize, String, u64)> = Vec::new();
+    for (i, task) in tasks.iter_mut().enumerate() {
         if task.pr_state == PrState::Merged {
             continue;
         }
         if let (Some(repo), Some(pr_number)) = (task.repo.as_deref(), task.pr_number) {
-            queries.push((i, repo.to_string(), pr_number));
+            if let Some(&(review_state, state)) = inbox_map.get(&(repo.to_string(), pr_number)) {
+                task.pr_state = if state == "merged" {
+                    PrState::Merged
+                } else {
+                    match review_state {
+                        "approved" => PrState::Approved,
+                        "changes_requested" => PrState::ChangesRequested,
+                        "commented" => PrState::Commented,
+                        _ => PrState::Open,
+                    }
+                };
+            } else {
+                fallback_queries.push((i, repo.to_string(), pr_number));
+            }
         }
     }
-    if queries.is_empty() {
-        return;
-    }
 
-    // GraphQL で一括取得
-    let mut query_parts = Vec::new();
-    for (idx, (_, repo, pr_number)) in queries.iter().enumerate() {
-        query_parts.push(format!(
-            "pr{idx}: repository(owner: \"ajainc\", name: \"{repo}\") {{ pullRequest(number: {pr_number}) {{ state reviewDecision }} }}"
-        ));
-    }
-    let graphql_query = format!("{{ {} }}", query_parts.join(" "));
-
-    let output = std::process::Command::new("gh")
-        .args(["api", "graphql", "-f", &format!("query={}", graphql_query)])
-        .output();
-
-    let Ok(output) = output else {
-        return;
-    };
-    let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
-        return;
-    };
-    let Some(data) = parsed.get("data") else {
-        return;
-    };
-
-    for (idx, (task_idx, _, _)) in queries.iter().enumerate() {
-        let key = format!("pr{idx}");
-        let Some(pr_data) = data.get(&key).and_then(|r| r.get("pullRequest")) else {
-            continue;
-        };
-        let state = pr_data.get("state").and_then(|v| v.as_str()).unwrap_or("");
-        let review_decision = pr_data.get("reviewDecision").and_then(|v| v.as_str()).unwrap_or("");
-        tasks[*task_idx].pr_state = match state {
-            "MERGED" => PrState::Merged,
-            _ => match review_decision {
-                "APPROVED" => PrState::Approved,
-                "CHANGES_REQUESTED" => PrState::ChangesRequested,
-                _ => PrState::Open,
-            },
-        };
+    // inbox に無い PR は GraphQL で取得
+    if !fallback_queries.is_empty() {
+        let mut query_parts = Vec::new();
+        for (idx, (_, repo, pr_number)) in fallback_queries.iter().enumerate() {
+            query_parts.push(format!(
+                "pr{idx}: repository(owner: \"ajainc\", name: \"{repo}\") {{ pullRequest(number: {pr_number}) {{ state reviewDecision }} }}"
+            ));
+        }
+        let graphql_query = format!("{{ {} }}", query_parts.join(" "));
+        let output = std::process::Command::new("gh")
+            .args(["api", "graphql", "-f", &format!("query={}", graphql_query)])
+            .output();
+        if let Ok(output) = output {
+            if let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
+                if let Some(data) = parsed.get("data") {
+                    for (idx, (task_idx, _, _)) in fallback_queries.iter().enumerate() {
+                        let key = format!("pr{idx}");
+                        if let Some(pr_data) = data.get(&key).and_then(|r| r.get("pullRequest")) {
+                            let state = pr_data.get("state").and_then(|v| v.as_str()).unwrap_or("");
+                            let review_decision = pr_data.get("reviewDecision").and_then(|v| v.as_str()).unwrap_or("");
+                            tasks[*task_idx].pr_state = match state {
+                                "MERGED" => PrState::Merged,
+                                _ => match review_decision {
+                                    "APPROVED" => PrState::Approved,
+                                    "CHANGES_REQUESTED" => PrState::ChangesRequested,
+                                    _ => PrState::Open,
+                                },
+                            };
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -831,6 +851,10 @@ fn parse_task_dir(task_dir: &Path) -> Option<WorkformeTask> {
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
+    let review_posted = state_value
+        .get("review_posted")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     let mut dynamic_stages = Vec::new();
 
@@ -874,6 +898,7 @@ fn parse_task_dir(task_dir: &Path) -> Option<WorkformeTask> {
         pr_url,
         pr_number,
         pr_state: PrState::None,
+        review_posted,
         worktree,
         dynamic_stages,
     })
@@ -998,6 +1023,7 @@ fn render_task_row(
                         PrState::Merged => ("Merged", gpui::rgb(0x8957e5)),
                         PrState::Approved => ("Approved", gpui::rgb(0x238636)),
                         PrState::ChangesRequested => ("Changes", gpui::rgb(0xd29922)),
+                        PrState::Commented => ("Commented", gpui::rgb(0x1f6feb)),
                         _ => ("", gpui::rgb(0x000000)),
                     };
                     el.child(
@@ -1052,6 +1078,7 @@ impl PartialEq for WorkformeTask {
         self.id == other.id
             && self.dynamic_stages == other.dynamic_stages
             && self.pr_state == other.pr_state
+            && self.review_posted == other.review_posted
     }
 }
 
@@ -1127,32 +1154,212 @@ struct ReviewFindings {
 #[derive(Debug, Clone, PartialEq)]
 struct ReviewFinding {
     severity: String,
+    file: String,
+    line: u64,
     text: String,
+    selected: bool,
+    posted: bool,
 }
 
-fn parse_review_findings(path: &Path) -> Option<ReviewFindings> {
-    let json_path = path.with_file_name("review-pr-findings.json");
+fn submit_review(
+    entity: &WeakEntity<WorkformeTaskView>,
+    workforme_root: &PathBuf,
+    repo: &str,
+    pr_number: u64,
+    event: &str,
+    cx: &mut App,
+) {
+    let (task_id, selected_keys) = entity
+        .upgrade()
+        .map(|v| {
+            let view = v.read(cx);
+            let id = view.task.id.clone();
+            let keys: Vec<String> = view.review_findings.as_ref()
+                .map(|r| r.items.iter()
+                    .filter(|f| f.selected)
+                    .map(|f| format!("{}:{}", f.file, f.line))
+                    .collect())
+                .unwrap_or_default();
+            (id, keys)
+        })
+        .unwrap_or_default();
+    if let Some(view) = entity.upgrade() {
+        view.update(cx, |view, cx| {
+            view.review_submitted = true;
+            if let Some(ref mut findings) = view.review_findings {
+                for item in findings.items.iter_mut() {
+                    if item.selected {
+                        item.posted = true;
+                        item.selected = false;
+                    }
+                }
+            }
+            view.task.pr_state = match event {
+                "APPROVE" => PrState::Approved,
+                "REQUEST_CHANGES" => PrState::ChangesRequested,
+                "COMMENT" => PrState::Commented,
+                _ => view.task.pr_state.clone(),
+            };
+            cx.notify();
+        });
+    }
+    let root = workforme_root.clone();
+    let repo = repo.to_string();
+    let event = event.to_string();
+    let comments: Vec<(String, u64, String)> = entity
+        .upgrade()
+        .map(|view| {
+            view.read(cx)
+                .review_findings
+                .as_ref()
+                .map(|r| {
+                    r.items
+                        .iter()
+                        .filter(|f| f.selected)
+                        .map(|f| (f.file.clone(), f.line, f.text.clone()))
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
+    std::thread::spawn(move || {
+        let org = std::process::Command::new("python3")
+            .arg(root.join("scripts/state.py"))
+            .arg("config")
+            .arg("github_org")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let commit_id = std::process::Command::new("gh")
+            .args([
+                "pr", "view", &pr_number.to_string(),
+                "--repo", &format!("{}/{}", org, repo),
+                "--json", "headRefOid", "--jq", ".headRefOid",
+            ])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        // Build review JSON body
+        let inline_comments: Vec<serde_json::Value> = comments
+            .iter()
+            .filter(|(file, line, _)| !file.is_empty() && *line > 0)
+            .map(|(file, line, text)| {
+                serde_json::json!({"path": file, "line": *line, "body": text})
+            })
+            .collect();
+        let body_comments: Vec<String> = comments
+            .iter()
+            .filter(|(file, line, _)| file.is_empty() || *line == 0)
+            .map(|(_, _, text)| text.clone())
+            .collect();
+        let body = if body_comments.is_empty() {
+            String::new()
+        } else {
+            body_comments.join("\n\n")
+        };
+        let mut review_json = serde_json::json!({
+            "event": event,
+            "commit_id": commit_id,
+            "body": body,
+        });
+        if !inline_comments.is_empty() {
+            review_json["comments"] = serde_json::Value::Array(inline_comments);
+        }
+        let json_str = serde_json::to_string(&review_json).unwrap_or_default();
+        use std::io::Write;
+        let mut success = false;
+        let mut child = std::process::Command::new("gh")
+            .args([
+                "api",
+                &format!("repos/{}/{}/pulls/{}/reviews", org, repo, pr_number),
+                "--method", "POST",
+                "--input", "-",
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .ok();
+        if let Some(ref mut c) = child {
+            if let Some(ref mut stdin) = c.stdin.take() {
+                stdin.write_all(json_str.as_bytes()).ok();
+            }
+            let stderr_output = c.stderr.take().and_then(|mut e| {
+                let mut buf = String::new();
+                use std::io::Read;
+                e.read_to_string(&mut buf).ok()?;
+                Some(buf)
+            });
+            if let Ok(status) = c.wait() {
+                success = status.success();
+                if !success {
+                    log::error!("workforme: review post failed: {}", stderr_output.unwrap_or_default());
+                }
+            }
+        }
+        if !success {
+            return;
+        }
+        // posted_findings を state.json に永続化
+        let state_path = root.join(".work").join(&task_id).join("state.json");
+        if let Ok(content) = std::fs::read_to_string(&state_path) {
+            if let Ok(mut state) = serde_json::from_str::<serde_json::Value>(&content) {
+                state["review_posted"] = serde_json::Value::Bool(true);
+                let mut existing: Vec<String> = state.get("posted_findings")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                    .unwrap_or_default();
+                for key in &selected_keys {
+                    if !existing.contains(key) {
+                        existing.push(key.clone());
+                    }
+                }
+                state["posted_findings"] = serde_json::Value::Array(
+                    existing.into_iter().map(|s| serde_json::Value::String(s)).collect()
+                );
+                if let Ok(json) = serde_json::to_string_pretty(&state) {
+                    std::fs::write(&state_path, json).ok();
+                }
+            }
+        }
+    });
+}
+
+fn parse_review_findings(task_dir: &Path) -> Option<ReviewFindings> {
+    let json_path = task_dir.join("review-pr-findings.json");
     let content = std::fs::read_to_string(&json_path).ok()?;
     let val = serde_json::from_str::<serde_json::Value>(&content).ok()?;
+
+    // state.json から posted 済み finding を読み取る
+    let posted_set: std::collections::HashSet<String> = std::fs::read_to_string(task_dir.join("state.json"))
+        .ok()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+        .and_then(|s| s.get("posted_findings")?.as_array().cloned())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default();
 
     let verdict = val.get("verdict").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let mut items = Vec::new();
     for (severity, key) in [("critical", "critical"), ("informational", "informational")] {
         if let Some(arr) = val.get(key).and_then(|v| v.as_array()) {
             for item in arr {
-                let file = item.get("file").and_then(|v| v.as_str()).unwrap_or("");
+                let file = item.get("file").and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let line = item.get("line").and_then(|v| v.as_u64()).unwrap_or(0);
-                let text = item.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                let location = if !file.is_empty() && line > 0 {
-                    format!("[{}:{}] ", file, line)
-                } else if !file.is_empty() {
-                    format!("[{}] ", file)
-                } else {
-                    String::new()
-                };
+                let text = item.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let finding_key = format!("{}:{}", file, line);
                 items.push(ReviewFinding {
                     severity: severity.to_string(),
-                    text: format!("{}{}", location, text),
+                    file,
+                    line,
+                    text,
+                    selected: false,
+                    posted: posted_set.contains(&finding_key),
                 });
             }
         }
@@ -1168,6 +1375,7 @@ pub struct WorkformeTaskView {
     busy_action: Option<String>,
     review_findings: Option<ReviewFindings>,
     expanded_findings: std::collections::HashSet<usize>,
+    review_submitted: bool,
     _poll_task: Task<()>,
 }
 
@@ -1185,20 +1393,25 @@ impl WorkformeTaskView {
                 loop {
                     cx.background_executor().timer(Duration::from_secs(3)).await;
                     let task_dir = workforme_root.join(".work").join(&task_id);
+                    let work_dir = workforme_root.join(".work");
                     let updated = cx
                         .background_executor()
                         .spawn(async move {
                             let mut task = parse_task_dir(&task_dir);
                             if let Some(ref mut t) = task {
                                 let mut tasks = [t.clone()];
-                                check_pr_states(&mut tasks);
+                                check_pr_states(&mut tasks, &work_dir);
                                 t.pr_state = tasks[0].pr_state.clone();
                             }
                             task
                         })
                         .await;
                     let result = this.update(cx, |view, cx| {
-                        if let Some(updated) = updated {
+                        if let Some(mut updated) = updated {
+                            // optimistic update を保護：submit 後は pr_state を上書きしない
+                            if view.review_submitted {
+                                updated.pr_state = view.task.pr_state.clone();
+                            }
                             if view.task != updated {
                                 view.task = updated;
                                 cx.notify();
@@ -1213,9 +1426,10 @@ impl WorkformeTaskView {
         });
 
         let review_findings = parse_review_findings(
-            &workforme_root.join(".work").join(&task.id).join("review-pr.md"),
+            &workforme_root.join(".work").join(&task.id),
         );
 
+        let review_submitted = task.review_posted;
         Self {
             focus_handle: cx.focus_handle(),
             task,
@@ -1224,6 +1438,7 @@ impl WorkformeTaskView {
             busy_action: None,
             review_findings,
             expanded_findings: std::collections::HashSet::new(),
+            review_submitted,
             _poll_task: poll_task,
         }
     }
@@ -1462,6 +1677,7 @@ impl Render for WorkformeTaskView {
                                     PrState::Merged => (Some("Merged"), gpui::rgb(0x8957e5)),
                                     PrState::Approved => (Some("Approved"), gpui::rgb(0x238636)),
                                     PrState::ChangesRequested => (Some("Changes Requested"), gpui::rgb(0xd29922)),
+                                    PrState::Commented => (Some("Commented"), gpui::rgb(0x1f6feb)),
                                     _ => (None, gpui::rgb(0x000000)),
                                 };
                                 el.child(
@@ -1683,6 +1899,8 @@ impl Render for WorkformeTaskView {
                     "REQUEST_CHANGES" => ("REQUEST_CHANGES", ui::Color::Error),
                     _ => ("COMMENT", ui::Color::Warning),
                 };
+                let has_selected = review.items.iter().any(|f| f.selected);
+                let submitted = self.review_submitted;
                 el.child(div().h(px(1.)).bg(cx.theme().colors().border))
                     .child(
                         v_flex()
@@ -1717,17 +1935,17 @@ impl Render for WorkformeTaskView {
                                 };
                                 let is_expanded = self.expanded_findings.contains(&i);
                                 let finding_text = finding.text.clone();
-                                let repo = self.task.repo.clone().unwrap_or_default();
-                                let pr_number = self.task.pr_number.unwrap_or(0);
-                                let workforme_root = self.workforme_root.clone();
-                                let entity_clone = entity.clone();
+                                let finding_file = finding.file.clone();
+                                let finding_line = finding.line;
+                                let is_selected = finding.selected;
+                                let is_posted = finding.posted;
                                 let entity_for_toggle = entity.clone();
+                                let entity_for_check = entity.clone();
 
-                                // 摘要: [file:line] 部分を抽出、なければ先頭 60 文字
-                                let summary_line = if finding_text.starts_with('[') {
-                                    finding_text.split(']').next()
-                                        .map(|s| format!("{}]", s))
-                                        .unwrap_or_else(|| finding_text.chars().take(60).collect())
+                                let summary_line = if !finding_file.is_empty() && finding_line > 0 {
+                                    format!("[{}:{}] {}", finding_file, finding_line, finding_text.chars().take(40).collect::<String>())
+                                } else if !finding_file.is_empty() {
+                                    format!("[{}] {}", finding_file, finding_text.chars().take(40).collect::<String>())
                                 } else {
                                     finding_text.chars().take(60).collect::<String>()
                                 };
@@ -1754,6 +1972,50 @@ impl Render for WorkformeTaskView {
                                                         cx.notify();
                                                     });
                                                 }
+                                            })
+                                            // Checkbox or Posted badge
+                                            .when(is_posted, |el| {
+                                                el.child(
+                                                    Label::new("✓")
+                                                        .size(ui::LabelSize::XSmall)
+                                                        .color(ui::Color::Success),
+                                                )
+                                            })
+                                            .when(!is_posted, |el| {
+                                                el.child(
+                                                    div()
+                                                        .id(gpui::ElementId::NamedInteger("wfm-finding-check".into(), i as u64))
+                                                        .w(px(14.))
+                                                        .h(px(14.))
+                                                        .rounded_sm()
+                                                        .border_1()
+                                                        .border_color(cx.theme().colors().border)
+                                                        .when(is_selected, |el| el.bg(cx.theme().colors().element_selected))
+                                                        .cursor_pointer()
+                                                        .flex_none()
+                                                        .items_center()
+                                                        .justify_center()
+                                                        .when(is_selected, |el| {
+                                                            el.child(
+                                                                Label::new("✓")
+                                                                    .size(ui::LabelSize::XSmall)
+                                                                    .color(ui::Color::Default),
+                                                            )
+                                                        })
+                                                        .on_click(move |_event, _window, cx| {
+                                                            cx.stop_propagation();
+                                                            if let Some(view) = entity_for_check.upgrade() {
+                                                                view.update(cx, |view, cx| {
+                                                                    if let Some(ref mut r) = view.review_findings {
+                                                                        if let Some(f) = r.items.get_mut(i) {
+                                                                            f.selected = !f.selected;
+                                                                        }
+                                                                    }
+                                                                    cx.notify();
+                                                                });
+                                                            }
+                                                        }),
+                                                )
                                             })
                                             .child(
                                                 Label::new(if is_expanded { "▼" } else { "▶" })
@@ -1785,74 +2047,93 @@ impl Render for WorkformeTaskView {
                                     )
                                     .when(is_expanded, |el| {
                                         el.child(
-                                            v_flex()
-                                                .pl_4()
-                                                .gap_1()
+                                            div()
+                                                .id(gpui::ElementId::NamedInteger("wfm-finding-body".into(), i as u64))
+                                                .ml_4()
+                                                .px_2()
+                                                .py_1()
+                                                .rounded_md()
+                                                .bg(cx.theme().colors().surface_background)
+                                                .max_h(px(120.))
+                                                .overflow_y_scroll()
                                                 .child(
-                                                    div()
-                                                        .id(gpui::ElementId::NamedInteger("wfm-finding-body".into(), i as u64))
-                                                        .px_2()
-                                                        .py_1()
-                                                        .rounded_md()
-                                                        .bg(cx.theme().colors().surface_background)
-                                                        .max_h(px(120.))
-                                                        .overflow_y_scroll()
-                                                        .child(
-                                                            Label::new(finding_text.clone())
-                                                                .size(ui::LabelSize::XSmall)
-                                                                .color(ui::Color::Default),
-                                                        ),
-                                                )
-                                                .when(pr_number > 0, |el| {
-                                                    el.child(
-                                                        div()
-                                                            .id(gpui::ElementId::NamedInteger("wfm-finding-post".into(), i as u64))
-                                                            .px_2()
-                                                            .py_0p5()
-                                                            .rounded_sm()
-                                                            .cursor_pointer()
-                                                            .bg(cx.theme().colors().ghost_element_hover)
-                                                            .hover(|s| s.bg(cx.theme().colors().ghost_element_selected))
-                                                            .child(
-                                                                Label::new("Post to PR")
-                                                                    .size(ui::LabelSize::XSmall)
-                                                                    .color(ui::Color::Accent),
-                                                            )
-                                                            .on_click(move |_event, _window, cx| {
-                                                                let org = std::process::Command::new("python3")
-                                                                    .arg(workforme_root.join("scripts/state.py"))
-                                                                    .arg("config")
-                                                                    .arg("github_org")
-                                                                    .output()
-                                                                    .ok()
-                                                                    .and_then(|o| String::from_utf8(o.stdout).ok())
-                                                                    .unwrap_or_default()
-                                                                    .trim()
-                                                                    .to_string();
-                                                                std::process::Command::new("gh")
-                                                                    .args([
-                                                                        "api",
-                                                                        &format!("repos/{}/{}/issues/{}/comments", org, repo, pr_number),
-                                                                        "--method", "POST",
-                                                                        "-f", &format!("body={}", finding_text),
-                                                                    ])
-                                                                    .spawn()
-                                                                    .ok();
-                                                                if let Some(view) = entity_clone.upgrade() {
-                                                                    view.update(cx, |view, cx| {
-                                                                        if let Some(ref mut r) = view.review_findings {
-                                                                            r.items.retain(|f| f.text != finding_text);
-                                                                        }
-                                                                        cx.notify();
-                                                                    });
-                                                                }
-                                                            }),
-                                                    )
-                                                }),
+                                                    Label::new(finding_text.clone())
+                                                        .size(ui::LabelSize::XSmall)
+                                                        .color(ui::Color::Default),
+                                                ),
                                         )
                                     })
                                     .into_any_element()
-                            })),
+                            }))
+                            // Submit bar
+                            .when(has_selected && !submitted, |el| {
+                                let repo = self.task.repo.clone().unwrap_or_default();
+                                let pr_number = self.task.pr_number.unwrap_or(0);
+                                let workforme_root = self.workforme_root.clone();
+                                let entity_comment = entity.clone();
+                                let entity_changes = entity.clone();
+                                let entity_approve = entity.clone();
+                                el.child(
+                                    h_flex()
+                                        .gap_2()
+                                        .py_1()
+                                        .child(
+                                            div()
+                                                .id("wfm-submit-comment")
+                                                .px_2().py_0p5().rounded_md()
+                                                .cursor_pointer()
+                                                .bg(cx.theme().colors().ghost_element_hover)
+                                                .hover(|s| s.bg(cx.theme().colors().ghost_element_selected))
+                                                .child(Label::new("Comment").size(ui::LabelSize::XSmall).color(ui::Color::Warning))
+                                                .on_click({
+                                                    let repo = repo.clone();
+                                                    let root = workforme_root.clone();
+                                                    move |_event, _window, cx| {
+                                                        submit_review(&entity_comment, &root, &repo, pr_number, "COMMENT", cx);
+                                                    }
+                                                }),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("wfm-submit-changes")
+                                                .px_2().py_0p5().rounded_md()
+                                                .cursor_pointer()
+                                                .bg(cx.theme().colors().ghost_element_hover)
+                                                .hover(|s| s.bg(cx.theme().colors().ghost_element_selected))
+                                                .child(Label::new("Request Changes").size(ui::LabelSize::XSmall).color(ui::Color::Error))
+                                                .on_click({
+                                                    let repo = repo.clone();
+                                                    let root = workforme_root.clone();
+                                                    move |_event, _window, cx| {
+                                                        submit_review(&entity_changes, &root, &repo, pr_number, "REQUEST_CHANGES", cx);
+                                                    }
+                                                }),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("wfm-submit-approve")
+                                                .px_2().py_0p5().rounded_md()
+                                                .cursor_pointer()
+                                                .bg(cx.theme().colors().ghost_element_hover)
+                                                .hover(|s| s.bg(cx.theme().colors().ghost_element_selected))
+                                                .child(Label::new("Approve").size(ui::LabelSize::XSmall).color(ui::Color::Success))
+                                                .on_click({
+                                                    let repo = repo.clone();
+                                                    let root = workforme_root.clone();
+                                                    move |_event, _window, cx| {
+                                                        submit_review(&entity_approve, &root, &repo, pr_number, "APPROVE", cx);
+                                                    }
+                                                }),
+                                        ),
+                                )
+                            })
+                            .when(submitted, |el| {
+                                el.child(
+                                    Label::new("Review submitted ✓")
+                                        .size(ui::LabelSize::XSmall)
+                                        .color(ui::Color::Success),
+                                )
+                            }),
                     )
             })
             // Divider
@@ -1882,6 +2163,35 @@ impl Render for WorkformeTaskView {
                                 }),
                         )
                     })
+                    // Rebase button (for issue-dev tasks with worktree)
+                    .when(
+                        self.task.worktree.is_some(),
+                        |el| {
+                            let workforme_root = self.workforme_root.clone();
+                            let task_id = self.task.id.clone();
+                            el.child(
+                                div()
+                                    .id("wfm-action-rebase")
+                                    .px_2()
+                                    .py_0p5()
+                                    .rounded_md()
+                                    .bg(cx.theme().colors().ghost_element_hover)
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(cx.theme().colors().ghost_element_selected))
+                                    .child(Label::new("↑ Rebase").size(ui::LabelSize::Small))
+                                    .on_click(move |_event, _window, _cx| {
+                                        let script = workforme_root.join("scripts/run-stage.sh");
+                                        let task_dir = workforme_root.join(".work").join(&task_id);
+                                        std::process::Command::new("bash")
+                                            .arg(&script)
+                                            .arg(&task_dir)
+                                            .arg("rebase")
+                                            .spawn()
+                                            .ok();
+                                    }),
+                            )
+                        },
+                    )
                     .when(
                         self.task.dynamic_stages.iter().any(|s| s.key == "implement" && matches!(s.status, StageStatus::Done))
                             && !self.task.dynamic_stages.iter().any(|s| s.key == "pr" && matches!(s.status, StageStatus::Done)),

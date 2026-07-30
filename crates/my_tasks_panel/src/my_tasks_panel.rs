@@ -54,6 +54,8 @@ struct InboxItem {
     greptile_score: Option<u8>,
     review_state: Option<String>,
     human_reviews: Vec<HumanReview>,
+    ci_status: Option<String>,
+    mergeable: Option<bool>,
 }
 
 pub struct MyTasksPanel {
@@ -62,6 +64,7 @@ pub struct MyTasksPanel {
     items: Vec<InboxItem>,
     running: std::collections::HashSet<String>,
     existing_urls: std::collections::HashSet<String>,
+    collapsed_repos: std::collections::HashSet<String>,
     syncing: bool,
     updated_at: Option<String>,
     _workspace: WeakEntity<Workspace>,
@@ -163,6 +166,7 @@ impl MyTasksPanel {
             items: init_items,
             running: std::collections::HashSet::new(),
             existing_urls: init_existing,
+            collapsed_repos: std::collections::HashSet::new(),
             syncing: false,
             updated_at: init_updated_at,
             _workspace: workspace,
@@ -236,17 +240,48 @@ impl MyTasksPanel {
         let entity = cx.entity().downgrade();
 
         for repo in &repos {
+            let is_collapsed = self.collapsed_repos.contains(repo);
+            let repo_clone = repo.clone();
+            let entity_for_repo = entity.clone();
+            let item_count = items.iter().filter(|i| &i.repo == repo).count();
             sections.push(
                 h_flex()
+                    .id(gpui::ElementId::Name(format!("mytask-repo-{}", repo).into()))
                     .px_2()
-                    .py_0p5()
+                    .py_1()
+                    .mt_1()
+                    .border_b_1()
+                    .border_color(cx.theme().colors().border)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(cx.theme().colors().ghost_element_hover))
                     .child(
-                        Label::new(repo.clone())
-                            .size(ui::LabelSize::Small)
+                        Label::new(if is_collapsed { "▶" } else { "▼" })
+                            .size(ui::LabelSize::XSmall)
                             .color(ui::Color::Muted),
                     )
+                    .child(
+                        Label::new(format!(" {} ({})", repo, item_count))
+                            .size(ui::LabelSize::Small)
+                            .color(ui::Color::Default),
+                    )
+                    .on_click(move |_event, _window, cx| {
+                        if let Some(panel) = entity_for_repo.upgrade() {
+                            panel.update(cx, |panel, cx| {
+                                if panel.collapsed_repos.contains(&repo_clone) {
+                                    panel.collapsed_repos.remove(&repo_clone);
+                                } else {
+                                    panel.collapsed_repos.insert(repo_clone.clone());
+                                }
+                                cx.notify();
+                            });
+                        }
+                    })
                     .into_any_element(),
             );
+
+            if is_collapsed {
+                continue;
+            }
 
             for (idx, item) in items.iter().filter(|i| &i.repo == repo).enumerate() {
                 let item_key = format!("{}/{}", item.repo, item.number);
@@ -269,6 +304,7 @@ impl MyTasksPanel {
                 let review_state_badge = match item.review_state.as_deref() {
                     Some("approved") => Some(("Approved", gpui::rgb(0x238636))),
                     Some("changes_requested") => Some(("Changes", gpui::rgb(0xd29922))),
+                    Some("commented") => Some(("Commented", gpui::rgb(0x58a6ff))),
                     _ => None,
                 };
 
@@ -347,6 +383,21 @@ impl MyTasksPanel {
                                             ),
                                     )
                                 })
+                                .when(
+                                    item.ci_status.as_deref() == Some("failure") || item.mergeable == Some(false),
+                                    |el| {
+                                        let (ci_label, ci_color) = if item.ci_status.as_deref() == Some("failure") {
+                                            ("CI✗", ui::Color::Error)
+                                        } else {
+                                            ("⚠conflict", ui::Color::Warning)
+                                        };
+                                        el.child(
+                                            Label::new(ci_label)
+                                                .size(ui::LabelSize::XSmall)
+                                                .color(ci_color),
+                                        )
+                                    },
+                                )
                                 .when(badge.is_some(), |el| {
                                     let (label, color) = badge.unwrap();
                                     el.child(
@@ -432,16 +483,38 @@ impl MyTasksPanel {
                                     },
                                 ),
                         )
-                        .child(
-                            h_flex()
-                                .gap_1()
-                                .child(
-                                    Label::new(item.summary.clone())
-                                        .size(ui::LabelSize::XSmall)
-                                        .color(ui::Color::Muted)
-                                        .single_line(),
-                                ),
-                        )
+                        .when(!item.human_reviews.is_empty(), |el| {
+                            el.child(
+                                h_flex()
+                                    .gap_1()
+                                    .children(item.human_reviews.iter().map(|r| {
+                                        let icon = match r.state.as_str() {
+                                            "approved" => "✓",
+                                            "changes_requested" => "✗",
+                                            "pending" => "○",
+                                            _ => "●",
+                                        };
+                                        let color = match r.state.as_str() {
+                                            "approved" => ui::Color::Success,
+                                            "changes_requested" => ui::Color::Error,
+                                            "pending" => ui::Color::Muted,
+                                            _ => ui::Color::Muted,
+                                        };
+                                        Label::new(format!("{}{}", icon, r.reviewer))
+                                            .size(ui::LabelSize::XSmall)
+                                            .color(color)
+                                            .into_any_element()
+                                    })),
+                            )
+                        })
+                        .when(!item.summary.is_empty(), |el| {
+                            el.child(
+                                Label::new(item.summary.clone())
+                                    .size(ui::LabelSize::XSmall)
+                                    .color(ui::Color::Muted)
+                                    .single_line(),
+                            )
+                        })
                         .into_any_element(),
                 );
             }
@@ -762,6 +835,14 @@ fn load_inbox(workforme_root: &PathBuf) -> (Vec<InboxItem>, Option<String>) {
             })
             .unwrap_or_default();
 
+        let ci_status = item
+            .get("ci_status")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let mergeable = item
+            .get("mergeable")
+            .and_then(|v| v.as_bool());
+
         items.push(InboxItem {
             repo,
             number,
@@ -774,6 +855,8 @@ fn load_inbox(workforme_root: &PathBuf) -> (Vec<InboxItem>, Option<String>) {
             greptile_score,
             review_state,
             human_reviews,
+            ci_status,
+            mergeable,
         });
     }
     (items, updated_at)
