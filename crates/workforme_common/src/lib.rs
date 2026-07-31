@@ -44,7 +44,8 @@ pub fn status_color(status: &str) -> u32 {
         "approved" => 0x238636,
         "changes_requested" => 0xd29922,
         "re_requested" => 0xf85149,
-        "commented" => 0x1f6feb,
+        "review_commented" => 0x1f6feb,
+        "commented" => 0x58a6ff,
         "merged" => 0x8957e5,
         "dismissed" => 0x848d97,
         "closed" => 0xda3633,
@@ -77,16 +78,9 @@ pub fn render_badges(status: &str, flags: &[String]) -> Vec<gpui::AnyElement> {
             continue;
         }
         badges.push(
-            div()
-                .flex_shrink_0()
-                .px_1()
-                .rounded_sm()
-                .bg(gpui::rgb(status_color(f)))
-                .child(
-                    Label::new(f.clone())
-                        .size(ui::LabelSize::XSmall)
-                        .color(ui::Color::Default),
-                )
+            Label::new(f.clone())
+                .size(ui::LabelSize::XSmall)
+                .color(ui::Color::Custom(gpui::rgb(status_color(f)).into()))
                 .into_any_element(),
         );
     }
