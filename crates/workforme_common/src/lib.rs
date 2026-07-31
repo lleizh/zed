@@ -46,6 +46,7 @@ pub fn status_color(status: &str) -> u32 {
         "re_requested" => 0xf85149,
         "commented" => 0x1f6feb,
         "merged" => 0x8957e5,
+        "dismissed" => 0x848d97,
         "closed" => 0xda3633,
         "open" => 0x848d97,
         _ => 0x848d97,
