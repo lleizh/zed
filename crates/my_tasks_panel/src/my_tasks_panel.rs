@@ -272,8 +272,7 @@ impl MyTasksPanel {
                 let entity_clone = entity.clone();
                 let item_key_clone = item_key.clone();
 
-                let status_badge = workforme_common::render_status_badge(&item.status);
-                let flag_badges = workforme_common::render_flag_badges(&item.flags, &item.status);
+                let badges = workforme_common::render_badges(&item.status, &item.flags);
 
                 sections.push(
                     v_flex()
@@ -357,10 +356,7 @@ impl MyTasksPanel {
                                         )
                                     },
                                 )
-                                .when_some(status_badge, |el, badge| {
-                                    el.child(badge)
-                                })
-                                .children(flag_badges)
+                                .children(badges)
                                 .when(
                                     item.status != "approved"
                                         && item.status != "merged",

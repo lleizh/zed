@@ -52,46 +52,44 @@ pub fn status_color(status: &str) -> u32 {
     }
 }
 
-/// status badge を描画する。open/空文字列の場合は None。
-pub fn render_status_badge(status: &str) -> Option<impl IntoElement> {
-    if status.is_empty() || status == "open" {
-        return None;
-    }
-    let color = status_color(status);
-    Some(
-        div()
-            .flex_shrink_0()
-            .px_1()
-            .rounded_sm()
-            .bg(gpui::rgb(color))
-            .child(
-                Label::new(status.to_string())
-                    .size(ui::LabelSize::XSmall)
-                    .color(ui::Color::Default),
-            ),
-    )
-}
-
-/// flags を badge 列として描画する。status と重複するものは除外。
-pub fn render_flag_badges(flags: &[String], status: &str) -> Vec<gpui::AnyElement> {
-    flags
-        .iter()
-        .filter(|f| f.as_str() != status)
-        .map(|f| {
-            let color = status_color(f);
+/// status + flags を一括で badge 列として描画する。
+/// open/空 status は表示しない。flags は status と重複するものを除外。
+pub fn render_badges(status: &str, flags: &[String]) -> Vec<gpui::AnyElement> {
+    let mut badges = Vec::new();
+    if !status.is_empty() && status != "open" {
+        badges.push(
             div()
                 .flex_shrink_0()
                 .px_1()
                 .rounded_sm()
-                .bg(gpui::rgb(color))
+                .bg(gpui::rgb(status_color(status)))
+                .child(
+                    Label::new(status.to_string())
+                        .size(ui::LabelSize::XSmall)
+                        .color(ui::Color::Default),
+                )
+                .into_any_element(),
+        );
+    }
+    for f in flags {
+        if f == status {
+            continue;
+        }
+        badges.push(
+            div()
+                .flex_shrink_0()
+                .px_1()
+                .rounded_sm()
+                .bg(gpui::rgb(status_color(f)))
                 .child(
                     Label::new(f.clone())
                         .size(ui::LabelSize::XSmall)
                         .color(ui::Color::Default),
                 )
-                .into_any_element()
-        })
-        .collect()
+                .into_any_element(),
+        );
+    }
+    badges
 }
 
 pub fn load_inbox(workforme_root: &Path) -> Inbox {

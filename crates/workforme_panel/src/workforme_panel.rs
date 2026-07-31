@@ -102,6 +102,7 @@ pub struct WorkformeTask {
     pr_url: Option<String>,
     pr_number: Option<u64>,
     pr_status: String,
+    pr_flags: Vec<String>,
     review_posted: bool,
     worktree: Option<String>,
     dynamic_stages: Vec<DynStage>,
@@ -709,6 +710,7 @@ fn check_pr_states(tasks: &mut [WorkformeTask], work_dir: &Path) {
         if let (Some(repo), Some(pr_number)) = (task.repo.as_deref(), task.pr_number) {
             if let Some(inbox_item) = inbox_map.get(&(repo.to_string(), pr_number)) {
                 task.pr_status = inbox_item.status.clone();
+                task.pr_flags = inbox_item.flags.clone();
             }
         }
     }
@@ -813,6 +815,7 @@ fn parse_task_dir(task_dir: &Path) -> Option<WorkformeTask> {
         pr_url,
         pr_number,
         pr_status: String::new(),
+        pr_flags: Vec::new(),
         review_posted,
         worktree,
         dynamic_stages,
@@ -933,9 +936,7 @@ fn render_task_row(
                                 .single_line(),
                         ),
                 )
-                .when_some(workforme_common::render_status_badge(&task.pr_status), |el, badge| {
-                    el.child(badge)
-                }),
+                .children(workforme_common::render_badges(&task.pr_status, &task.pr_flags)),
         )
         .child(
             h_flex()
@@ -975,6 +976,7 @@ impl PartialEq for WorkformeTask {
         self.id == other.id
             && self.dynamic_stages == other.dynamic_stages
             && self.pr_status == other.pr_status
+            && self.pr_flags == other.pr_flags
             && self.review_posted == other.review_posted
     }
 }
@@ -1312,6 +1314,7 @@ impl WorkformeTaskView {
                                 let mut tasks = [t.clone()];
                                 check_pr_states(&mut tasks, &work_dir);
                                 t.pr_status = tasks[0].pr_status.clone();
+                                t.pr_flags = tasks[0].pr_flags.clone();
                             }
                             task
                         })
@@ -1603,9 +1606,7 @@ impl Render for WorkformeTaskView {
                                                     cx.open_url(&pr_url_clone);
                                                 })
                                         )
-                                        .when_some(workforme_common::render_status_badge(pr_status), |el, badge| {
-                                            el.child(div().ml_2().child(badge))
-                                        })
+                                        .children(workforme_common::render_badges(pr_status, &self.task.pr_flags))
                                 )
                             })
                     ),
