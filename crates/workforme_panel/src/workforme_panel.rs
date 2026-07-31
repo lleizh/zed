@@ -1222,34 +1222,19 @@ fn submit_review(
                 }
             }
         }
-        // inbox.json の status を更新
-        let new_status = match event.as_str() {
-            "APPROVE" => "approved",
-            "REQUEST_CHANGES" => "changes_requested",
-            "COMMENT" => "commented",
-            _ => return,
-        };
-        update_inbox_status(&root, &repo, pr_number, new_status);
+        trigger_sync_inbox(&root);
     });
 }
 
-fn update_inbox_status(workforme_root: &Path, repo: &str, pr_number: u64, status: &str) {
-    let inbox_path = workforme_root.join(".work/inbox.json");
-    let Ok(content) = std::fs::read_to_string(&inbox_path) else { return };
-    let Ok(mut data) = serde_json::from_str::<serde_json::Value>(&content) else { return };
-    if let Some(items) = data.get_mut("items").and_then(|v| v.as_array_mut()) {
-        for item in items.iter_mut() {
-            let r = item.get("repo").and_then(|v| v.as_str()).unwrap_or("");
-            let n = item.get("number").and_then(|v| v.as_u64()).unwrap_or(0);
-            if r == repo && n == pr_number {
-                item["status"] = serde_json::Value::String(status.to_string());
-                break;
-            }
-        }
-    }
-    if let Ok(json) = serde_json::to_string_pretty(&data) {
-        std::fs::write(&inbox_path, json).ok();
-    }
+fn trigger_sync_inbox(workforme_root: &Path) {
+    let script = workforme_root.join("scripts/sync-inbox.sh");
+    let root = workforme_root.to_path_buf();
+    std::thread::spawn(move || {
+        std::process::Command::new(&script)
+            .current_dir(&root)
+            .output()
+            .ok();
+    });
 }
 
 fn parse_review_findings(task_dir: &Path) -> Option<ReviewFindings> {
@@ -2211,7 +2196,7 @@ impl Render for WorkformeTaskView {
                                                 .output();
                                             if let Ok(output) = result {
                                                 if output.status.success() {
-                                                    update_inbox_status(&workforme_root_clone, &repo_clone, pr_number, "approved");
+                                                    trigger_sync_inbox(&workforme_root_clone);
                                                 } else {
                                                     log::error!("workforme: approve failed: {}", String::from_utf8_lossy(&output.stderr));
                                                 }
@@ -2274,7 +2259,7 @@ impl Render for WorkformeTaskView {
                                                 .output();
                                             if let Ok(output) = result {
                                                 if output.status.success() {
-                                                    update_inbox_status(&workforme_root_clone, &repo_clone, pr_number, "merged");
+                                                    trigger_sync_inbox(&workforme_root_clone);
                                                 } else {
                                                     log::error!("workforme: merge failed: {}", String::from_utf8_lossy(&output.stderr));
                                                 }
