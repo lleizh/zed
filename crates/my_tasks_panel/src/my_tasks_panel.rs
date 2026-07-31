@@ -8,6 +8,7 @@ use gpui::{
     StatefulInteractiveElement, Styled, Task, WeakEntity, Window, actions, div, px,
 };
 use settings::Settings;
+use workforme_common::{self, InboxItem, ItemKind};
 use workforme_panel::WorkformePanelSettings;
 use ui::{
     ActiveTheme, ButtonCommon, Clickable, Disableable, FluentBuilder, IconButton, IconName,
@@ -26,36 +27,6 @@ actions!(my_tasks_panel, [ToggleFocus]);
 enum PanelTab {
     Mine,
     Team,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum ItemKind {
-    Issue,
-    PullRequest,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct HumanReview {
-    reviewer: String,
-    state: String,
-    summary: String,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct InboxItem {
-    repo: String,
-    number: u64,
-    title: String,
-    url: String,
-    kind: ItemKind,
-    role: String,
-    state: String,
-    summary: String,
-    greptile_score: Option<u8>,
-    review_state: Option<String>,
-    human_reviews: Vec<HumanReview>,
-    ci_status: Option<String>,
-    mergeable: Option<bool>,
 }
 
 pub struct MyTasksPanel {
@@ -301,20 +272,8 @@ impl MyTasksPanel {
                 let entity_clone = entity.clone();
                 let item_key_clone = item_key.clone();
 
-                let review_state_badge = match item.review_state.as_deref() {
-                    Some("approved") => Some(("Approved", gpui::rgb(0x238636))),
-                    Some("changes_requested") => Some(("Changes", gpui::rgb(0xd29922))),
-                    Some("commented") => Some(("Commented", gpui::rgb(0x58a6ff))),
-                    _ => None,
-                };
-
-                let state_badge = match item.state.as_str() {
-                    "merged" => Some(("Merged", gpui::rgb(0x8957e5))),
-                    "closed" => Some(("Closed", gpui::rgb(0xda3633))),
-                    _ => None,
-                };
-
-                let badge = review_state_badge.or(state_badge);
+                let status_badge = workforme_common::render_status_badge(&item.status);
+                let flag_badges = workforme_common::render_flag_badges(&item.flags, &item.status);
 
                 sections.push(
                     v_flex()
@@ -398,23 +357,13 @@ impl MyTasksPanel {
                                         )
                                     },
                                 )
-                                .when(badge.is_some(), |el| {
-                                    let (label, color) = badge.unwrap();
-                                    el.child(
-                                        div()
-                                            .px_1()
-                                            .rounded_sm()
-                                            .bg(color)
-                                            .child(
-                                                Label::new(label)
-                                                    .size(ui::LabelSize::XSmall)
-                                                    .color(ui::Color::Default),
-                                            ),
-                                    )
+                                .when_some(status_badge, |el, badge| {
+                                    el.child(badge)
                                 })
+                                .children(flag_badges)
                                 .when(
-                                    badge.map(|b| b.0) != Some("Approved")
-                                        && badge.map(|b| b.0) != Some("Merged"),
+                                    item.status != "approved"
+                                        && item.status != "merged",
                                     |el| {
                                         el.child(
                                             div()
@@ -491,12 +440,14 @@ impl MyTasksPanel {
                                         let icon = match r.state.as_str() {
                                             "approved" => "✓",
                                             "changes_requested" => "✗",
+                                            "re_requested" => "⟳",
                                             "pending" => "○",
                                             _ => "●",
                                         };
                                         let color = match r.state.as_str() {
                                             "approved" => ui::Color::Success,
                                             "changes_requested" => ui::Color::Error,
+                                            "re_requested" => ui::Color::Warning,
                                             "pending" => ui::Color::Muted,
                                             _ => ui::Color::Muted,
                                         };
@@ -752,114 +703,8 @@ fn format_updated_at(iso: &str) -> String {
 }
 
 fn load_inbox(workforme_root: &PathBuf) -> (Vec<InboxItem>, Option<String>) {
-    let inbox_path = workforme_root.join(".work/inbox.json");
-    let Ok(content) = std::fs::read_to_string(&inbox_path) else {
-        return (Vec::new(), None);
-    };
-    let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) else {
-        return (Vec::new(), None);
-    };
-    let updated_at = val
-        .get("updated_at")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let Some(items_arr) = val.get("items").and_then(|v| v.as_array()) else {
-        return (Vec::new(), updated_at);
-    };
-
-    let mut items = Vec::new();
-    for item in items_arr {
-        let repo = item
-            .get("repo")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-        let number = item.get("number").and_then(|v| v.as_u64()).unwrap_or(0);
-        if number == 0 {
-            continue;
-        }
-        let title = item
-            .get("title")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-        let url = item
-            .get("url")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-        let kind = match item.get("kind").and_then(|v| v.as_str()).unwrap_or("issue") {
-            "pull_request" => ItemKind::PullRequest,
-            _ => ItemKind::Issue,
-        };
-        let role = item
-            .get("role")
-            .and_then(|v| v.as_str())
-            .unwrap_or("assignee")
-            .to_string();
-        let state = item
-            .get("state")
-            .and_then(|v| v.as_str())
-            .unwrap_or("open")
-            .to_string();
-        let summary = item
-            .get("summary")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let greptile_score = item
-            .get("greptile_score")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as u8);
-        let review_state = item
-            .get("review_state")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let human_reviews = item
-            .get("human_reviews")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|r| {
-                        Some(HumanReview {
-                            reviewer: r.get("reviewer")?.as_str()?.to_string(),
-                            state: r.get("state")?.as_str()?.to_string(),
-                            summary: r
-                                .get("summary")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string(),
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let ci_status = item
-            .get("ci_status")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let mergeable = item
-            .get("mergeable")
-            .and_then(|v| v.as_bool());
-
-        items.push(InboxItem {
-            repo,
-            number,
-            title,
-            url,
-            kind,
-            role,
-            state,
-            summary,
-            greptile_score,
-            review_state,
-            human_reviews,
-            ci_status,
-            mergeable,
-        });
-    }
-    (items, updated_at)
+    let inbox = workforme_common::load_inbox(workforme_root);
+    (inbox.items, inbox.updated_at)
 }
 
 fn load_existing_task_urls(workforme_root: &PathBuf) -> std::collections::HashSet<String> {

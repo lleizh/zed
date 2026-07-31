@@ -11296,6 +11296,7 @@ dependencies = [
  "settings",
  "shellexpand",
  "ui",
+ "workforme_common",
  "workforme_panel",
  "workspace",
  "zed_actions",
@@ -22705,6 +22706,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "workforme_common"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "serde_json",
+ "ui",
+]
+
+[[package]]
 name = "workforme_panel"
 version = "0.1.0"
 dependencies = [
@@ -22718,6 +22728,7 @@ dependencies = [
  "task",
  "ui",
  "util",
+ "workforme_common",
  "workspace",
  "zed_actions",
 ]

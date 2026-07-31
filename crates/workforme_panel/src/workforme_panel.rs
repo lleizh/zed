@@ -90,16 +90,6 @@ struct DynStage {
     session_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-enum PrState {
-    None,
-    Open,
-    Approved,
-    ChangesRequested,
-    Commented,
-    Merged,
-}
-
 #[derive(Debug, Clone)]
 pub struct WorkformeTask {
     id: String,
@@ -111,7 +101,7 @@ pub struct WorkformeTask {
     url: Option<String>,
     pr_url: Option<String>,
     pr_number: Option<u64>,
-    pr_state: PrState,
+    pr_status: String,
     review_posted: bool,
     worktree: Option<String>,
     dynamic_stages: Vec<DynStage>,
@@ -565,20 +555,6 @@ impl Render for WorkformePanel {
                     .child(
                         h_flex()
                             .gap_1()
-                            .child({
-                                let entity = cx.entity().downgrade();
-                                IconButton::new("wfm-refresh", IconName::ArrowCircle)
-                                    .icon_size(IconSize::Small)
-                                    .tooltip(Tooltip::text("Refresh"))
-                                    .on_click(move |_event, _window, cx| {
-                                        if let Some(panel) = entity.upgrade() {
-                                            panel.update(cx, |panel, cx| {
-                                                panel.deleting_ids.clear();
-                                                panel.reload(cx);
-                                            });
-                                        }
-                                    })
-                            })
                             .child(
                         IconButton::new("wfm-add-task", IconName::Plus)
                             .icon_size(IconSize::Small)
@@ -717,83 +693,22 @@ fn load_tasks_from_disk(work_dir: &Path) -> Vec<WorkformeTask> {
 }
 
 fn check_pr_states(tasks: &mut [WorkformeTask], work_dir: &Path) {
-    let inbox_path = work_dir.join("inbox.json");
-    let Ok(content) = std::fs::read_to_string(&inbox_path) else {
-        return;
-    };
-    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content) else {
-        return;
-    };
-    let Some(items) = parsed.get("items").and_then(|v| v.as_array()) else {
-        return;
-    };
+    let inbox = workforme_common::load_inbox(&work_dir.parent().unwrap_or(work_dir));
 
-    // repo/number → review_state + state
-    let mut inbox_map: HashMap<(String, u64), (&str, &str)> = HashMap::new();
-    for item in items {
-        let repo = item.get("repo").and_then(|v| v.as_str()).unwrap_or("");
-        let number = item.get("number").and_then(|v| v.as_u64()).unwrap_or(0);
-        let review_state = item.get("review_state").and_then(|v| v.as_str()).unwrap_or("");
-        let state = item.get("state").and_then(|v| v.as_str()).unwrap_or("open");
-        if number > 0 {
-            inbox_map.insert((repo.to_string(), number), (review_state, state));
+    let mut inbox_map: HashMap<(String, u64), &workforme_common::InboxItem> = HashMap::new();
+    for item in &inbox.items {
+        if item.number > 0 {
+            inbox_map.insert((item.repo.clone(), item.number), item);
         }
     }
 
-    let mut fallback_queries: Vec<(usize, String, u64)> = Vec::new();
-    for (i, task) in tasks.iter_mut().enumerate() {
-        if task.pr_state == PrState::Merged {
+    for task in tasks.iter_mut() {
+        if task.pr_status == "merged" {
             continue;
         }
         if let (Some(repo), Some(pr_number)) = (task.repo.as_deref(), task.pr_number) {
-            if let Some(&(review_state, state)) = inbox_map.get(&(repo.to_string(), pr_number)) {
-                task.pr_state = if state == "merged" {
-                    PrState::Merged
-                } else {
-                    match review_state {
-                        "approved" => PrState::Approved,
-                        "changes_requested" => PrState::ChangesRequested,
-                        "commented" => PrState::Commented,
-                        _ => PrState::Open,
-                    }
-                };
-            } else {
-                fallback_queries.push((i, repo.to_string(), pr_number));
-            }
-        }
-    }
-
-    // inbox に無い PR は GraphQL で取得
-    if !fallback_queries.is_empty() {
-        let mut query_parts = Vec::new();
-        for (idx, (_, repo, pr_number)) in fallback_queries.iter().enumerate() {
-            query_parts.push(format!(
-                "pr{idx}: repository(owner: \"ajainc\", name: \"{repo}\") {{ pullRequest(number: {pr_number}) {{ state reviewDecision }} }}"
-            ));
-        }
-        let graphql_query = format!("{{ {} }}", query_parts.join(" "));
-        let output = std::process::Command::new("gh")
-            .args(["api", "graphql", "-f", &format!("query={}", graphql_query)])
-            .output();
-        if let Ok(output) = output {
-            if let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
-                if let Some(data) = parsed.get("data") {
-                    for (idx, (task_idx, _, _)) in fallback_queries.iter().enumerate() {
-                        let key = format!("pr{idx}");
-                        if let Some(pr_data) = data.get(&key).and_then(|r| r.get("pullRequest")) {
-                            let state = pr_data.get("state").and_then(|v| v.as_str()).unwrap_or("");
-                            let review_decision = pr_data.get("reviewDecision").and_then(|v| v.as_str()).unwrap_or("");
-                            tasks[*task_idx].pr_state = match state {
-                                "MERGED" => PrState::Merged,
-                                _ => match review_decision {
-                                    "APPROVED" => PrState::Approved,
-                                    "CHANGES_REQUESTED" => PrState::ChangesRequested,
-                                    _ => PrState::Open,
-                                },
-                            };
-                        }
-                    }
-                }
+            if let Some(inbox_item) = inbox_map.get(&(repo.to_string(), pr_number)) {
+                task.pr_status = inbox_item.status.clone();
             }
         }
     }
@@ -897,7 +812,7 @@ fn parse_task_dir(task_dir: &Path) -> Option<WorkformeTask> {
         url,
         pr_url,
         pr_number,
-        pr_state: PrState::None,
+        pr_status: String::new(),
         review_posted,
         worktree,
         dynamic_stages,
@@ -1018,26 +933,8 @@ fn render_task_row(
                                 .single_line(),
                         ),
                 )
-                .when(task.pr_state != PrState::None && task.pr_state != PrState::Open, |el| {
-                    let (label, color) = match &task.pr_state {
-                        PrState::Merged => ("Merged", gpui::rgb(0x8957e5)),
-                        PrState::Approved => ("Approved", gpui::rgb(0x238636)),
-                        PrState::ChangesRequested => ("Changes", gpui::rgb(0xd29922)),
-                        PrState::Commented => ("Commented", gpui::rgb(0x1f6feb)),
-                        _ => ("", gpui::rgb(0x000000)),
-                    };
-                    el.child(
-                        div()
-                            .flex_shrink_0()
-                            .px_1()
-                            .rounded_sm()
-                            .bg(color)
-                            .child(
-                                Label::new(label)
-                                    .size(ui::LabelSize::XSmall)
-                                    .color(ui::Color::Default),
-                            ),
-                    )
+                .when_some(workforme_common::render_status_badge(&task.pr_status), |el, badge| {
+                    el.child(badge)
                 }),
         )
         .child(
@@ -1077,7 +974,7 @@ impl PartialEq for WorkformeTask {
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id
             && self.dynamic_stages == other.dynamic_stages
-            && self.pr_state == other.pr_state
+            && self.pr_status == other.pr_status
             && self.review_posted == other.review_posted
     }
 }
@@ -1314,18 +1211,18 @@ fn submit_review(
                 }
             }
         }
-        // inbox.json の review_state を更新
-        update_inbox_review_state(&root, &repo, pr_number, &event);
+        // inbox.json の status を更新
+        let new_status = match event.as_str() {
+            "APPROVE" => "approved",
+            "REQUEST_CHANGES" => "changes_requested",
+            "COMMENT" => "commented",
+            _ => return,
+        };
+        update_inbox_status(&root, &repo, pr_number, new_status);
     });
 }
 
-fn update_inbox_review_state(workforme_root: &Path, repo: &str, pr_number: u64, event: &str) {
-    let review_state = match event {
-        "APPROVE" => "approved",
-        "REQUEST_CHANGES" => "changes_requested",
-        "COMMENT" => "commented",
-        _ => return,
-    };
+fn update_inbox_status(workforme_root: &Path, repo: &str, pr_number: u64, status: &str) {
     let inbox_path = workforme_root.join(".work/inbox.json");
     let Ok(content) = std::fs::read_to_string(&inbox_path) else { return };
     let Ok(mut data) = serde_json::from_str::<serde_json::Value>(&content) else { return };
@@ -1334,26 +1231,7 @@ fn update_inbox_review_state(workforme_root: &Path, repo: &str, pr_number: u64, 
             let r = item.get("repo").and_then(|v| v.as_str()).unwrap_or("");
             let n = item.get("number").and_then(|v| v.as_u64()).unwrap_or(0);
             if r == repo && n == pr_number {
-                item["review_state"] = serde_json::Value::String(review_state.to_string());
-                break;
-            }
-        }
-    }
-    if let Ok(json) = serde_json::to_string_pretty(&data) {
-        std::fs::write(&inbox_path, json).ok();
-    }
-}
-
-fn update_inbox_pr_state(workforme_root: &Path, repo: &str, pr_number: u64, state: &str) {
-    let inbox_path = workforme_root.join(".work/inbox.json");
-    let Ok(content) = std::fs::read_to_string(&inbox_path) else { return };
-    let Ok(mut data) = serde_json::from_str::<serde_json::Value>(&content) else { return };
-    if let Some(items) = data.get_mut("items").and_then(|v| v.as_array_mut()) {
-        for item in items.iter_mut() {
-            let r = item.get("repo").and_then(|v| v.as_str()).unwrap_or("");
-            let n = item.get("number").and_then(|v| v.as_u64()).unwrap_or(0);
-            if r == repo && n == pr_number {
-                item["state"] = serde_json::Value::String(state.to_string());
+                item["status"] = serde_json::Value::String(status.to_string());
                 break;
             }
         }
@@ -1433,7 +1311,7 @@ impl WorkformeTaskView {
                             if let Some(ref mut t) = task {
                                 let mut tasks = [t.clone()];
                                 check_pr_states(&mut tasks, &work_dir);
-                                t.pr_state = tasks[0].pr_state.clone();
+                                t.pr_status = tasks[0].pr_status.clone();
                             }
                             task
                         })
@@ -1712,13 +1590,7 @@ impl Render for WorkformeTaskView {
                             // PR row (clickable → open in browser)
                             .when_some(self.task.pr_url.clone(), |el, pr_url| {
                                 let pr_url_clone = pr_url.clone();
-                                let (pr_badge_label, pr_badge_color) = match &self.task.pr_state {
-                                    PrState::Merged => (Some("Merged"), gpui::rgb(0x8957e5)),
-                                    PrState::Approved => (Some("Approved"), gpui::rgb(0x238636)),
-                                    PrState::ChangesRequested => (Some("Changes Requested"), gpui::rgb(0xd29922)),
-                                    PrState::Commented => (Some("Commented"), gpui::rgb(0x1f6feb)),
-                                    _ => (None, gpui::rgb(0x000000)),
-                                };
+                                let pr_status = &self.task.pr_status;
                                 el.child(
                                     h_flex()
                                         .child(div().w(px(60.)).child(Label::new("PR").size(ui::LabelSize::XSmall).color(ui::Color::Muted)))
@@ -1731,19 +1603,8 @@ impl Render for WorkformeTaskView {
                                                     cx.open_url(&pr_url_clone);
                                                 })
                                         )
-                                        .when_some(pr_badge_label, |el, label| {
-                                            el.child(
-                                                div()
-                                                    .ml_2()
-                                                    .px_1()
-                                                    .rounded_sm()
-                                                    .bg(pr_badge_color)
-                                                    .child(
-                                                        Label::new(label)
-                                                            .size(ui::LabelSize::XSmall)
-                                                            .color(ui::Color::Default),
-                                                    ),
-                                            )
+                                        .when_some(workforme_common::render_status_badge(pr_status), |el, badge| {
+                                            el.child(div().ml_2().child(badge))
                                         })
                                 )
                             })
@@ -2297,7 +2158,7 @@ impl Render for WorkformeTaskView {
                         self.task.task_type.as_deref() == Some("review")
                             && self.task.pr_number.is_some()
                             && self.task.repo.is_some()
-                            && self.task.pr_state != PrState::Approved
+                            && self.task.pr_status != "approved"
                             && self.busy_action.as_deref() != Some("approve"),
                         |el| {
                             let repo = self.task.repo.clone().unwrap();
@@ -2340,7 +2201,7 @@ impl Render for WorkformeTaskView {
                                                 .output();
                                             if let Ok(output) = result {
                                                 if output.status.success() {
-                                                    update_inbox_review_state(&workforme_root_clone, &repo_clone, pr_number, "APPROVE");
+                                                    update_inbox_status(&workforme_root_clone, &repo_clone, pr_number, "approved");
                                                 } else {
                                                     log::error!("workforme: approve failed: {}", String::from_utf8_lossy(&output.stderr));
                                                 }
@@ -2366,7 +2227,7 @@ impl Render for WorkformeTaskView {
                         self.task.task_type.as_deref() != Some("review")
                             && self.task.pr_number.is_some()
                             && self.task.repo.is_some()
-                            && self.task.pr_state == PrState::Approved
+                            && self.task.pr_status == "approved"
                             && self.busy_action.as_deref() != Some("merge"),
                         |el| {
                             let repo = self.task.repo.clone().unwrap();
@@ -2403,7 +2264,7 @@ impl Render for WorkformeTaskView {
                                                 .output();
                                             if let Ok(output) = result {
                                                 if output.status.success() {
-                                                    update_inbox_pr_state(&workforme_root_clone, &repo_clone, pr_number, "merged");
+                                                    update_inbox_status(&workforme_root_clone, &repo_clone, pr_number, "merged");
                                                 } else {
                                                     log::error!("workforme: merge failed: {}", String::from_utf8_lossy(&output.stderr));
                                                 }
