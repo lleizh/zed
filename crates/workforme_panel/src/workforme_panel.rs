@@ -101,8 +101,7 @@ pub struct WorkformeTask {
     url: Option<String>,
     pr_url: Option<String>,
     pr_number: Option<u64>,
-    pr_status: String,
-    pr_flags: Vec<String>,
+    inbox_item: Option<workforme_common::InboxItem>,
     review_posted: bool,
     worktree: Option<String>,
     dynamic_stages: Vec<DynStage>,
@@ -704,13 +703,12 @@ fn check_pr_states(tasks: &mut [WorkformeTask], work_dir: &Path) {
     }
 
     for task in tasks.iter_mut() {
-        if task.pr_status == "merged" {
+        if task.inbox_item.as_ref().map(|i| i.status.as_str()) == Some("merged") {
             continue;
         }
         if let (Some(repo), Some(pr_number)) = (task.repo.as_deref(), task.pr_number) {
             if let Some(inbox_item) = inbox_map.get(&(repo.to_string(), pr_number)) {
-                task.pr_status = inbox_item.status.clone();
-                task.pr_flags = inbox_item.flags.clone();
+                task.inbox_item = Some((*inbox_item).clone());
             }
         }
     }
@@ -814,8 +812,7 @@ fn parse_task_dir(task_dir: &Path) -> Option<WorkformeTask> {
         url,
         pr_url,
         pr_number,
-        pr_status: String::new(),
-        pr_flags: Vec::new(),
+        inbox_item: None,
         review_posted,
         worktree,
         dynamic_stages,
@@ -912,37 +909,50 @@ fn render_task_row(
             h_flex()
                 .gap_1()
                 .items_center()
-                .when_some(task.task_type.clone(), |el, task_type| {
-                    el.child(
-                        div()
-                            .px_1()
-                            .rounded_sm()
-                            .bg(cx.theme().colors().element_background)
-                            .child(
-                                Label::new(task_type)
-                                    .size(ui::LabelSize::XSmall)
-                                    .color(ui::Color::Muted),
-                            ),
-                    )
-                })
                 .child(
-                    div()
+                    v_flex()
                         .flex_1()
                         .min_w_0()
-                        .overflow_hidden()
+                        .gap_0p5()
                         .child(
-                            Label::new(task.title.clone())
-                                .size(ui::LabelSize::Default)
-                                .single_line(),
+                            h_flex()
+                                .gap_1()
+                                .items_center()
+                                .when_some(task.task_type.clone(), |el, task_type| {
+                                    el.child(
+                                        div()
+                                            .px_1()
+                                            .rounded_sm()
+                                            .bg(cx.theme().colors().element_background)
+                                            .child(
+                                                Label::new(task_type)
+                                                    .size(ui::LabelSize::XSmall)
+                                                    .color(ui::Color::Muted),
+                                            ),
+                                    )
+                                })
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .child(
+                                            Label::new(task.title.clone())
+                                                .size(ui::LabelSize::Default)
+                                                .single_line(),
+                                        ),
+                                ),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .items_center()
+                                .child(render_dynamic_badges(&task.dynamic_stages, cx)),
                         ),
                 )
-                .children(workforme_common::render_badges(&task.pr_status, &task.pr_flags)),
-        )
-        .child(
-            h_flex()
-                .gap_1()
-                .items_center()
-                .child(render_dynamic_badges(&task.dynamic_stages, cx)),
+                .when_some(task.inbox_item.as_ref(), |el, inbox_item| {
+                    el.child(workforme_common::render_item_status(inbox_item, None))
+                }),
         )
 }
 
@@ -975,8 +985,7 @@ impl PartialEq for WorkformeTask {
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id
             && self.dynamic_stages == other.dynamic_stages
-            && self.pr_status == other.pr_status
-            && self.pr_flags == other.pr_flags
+            && self.inbox_item == other.inbox_item
             && self.review_posted == other.review_posted
     }
 }
@@ -1313,8 +1322,7 @@ impl WorkformeTaskView {
                             if let Some(ref mut t) = task {
                                 let mut tasks = [t.clone()];
                                 check_pr_states(&mut tasks, &work_dir);
-                                t.pr_status = tasks[0].pr_status.clone();
-                                t.pr_flags = tasks[0].pr_flags.clone();
+                                t.inbox_item = tasks[0].inbox_item.clone();
                             }
                             task
                         })
@@ -1593,7 +1601,6 @@ impl Render for WorkformeTaskView {
                             // PR row (clickable → open in browser)
                             .when_some(self.task.pr_url.clone(), |el, pr_url| {
                                 let pr_url_clone = pr_url.clone();
-                                let pr_status = &self.task.pr_status;
                                 el.child(
                                     h_flex()
                                         .child(div().w(px(60.)).child(Label::new("PR").size(ui::LabelSize::XSmall).color(ui::Color::Muted)))
@@ -1606,7 +1613,9 @@ impl Render for WorkformeTaskView {
                                                     cx.open_url(&pr_url_clone);
                                                 })
                                         )
-                                        .children(workforme_common::render_badges(pr_status, &self.task.pr_flags))
+                                        .when_some(self.task.inbox_item.as_ref(), |el, inbox_item| {
+                                            el.child(workforme_common::render_item_status(inbox_item, None))
+                                        })
                                 )
                             })
                     ),
@@ -2159,7 +2168,7 @@ impl Render for WorkformeTaskView {
                         self.task.task_type.as_deref() == Some("review")
                             && self.task.pr_number.is_some()
                             && self.task.repo.is_some()
-                            && self.task.pr_status != "approved"
+                            && self.task.inbox_item.as_ref().map(|i| i.status.as_str()) != Some("approved")
                             && self.busy_action.as_deref() != Some("approve"),
                         |el| {
                             let repo = self.task.repo.clone().unwrap();
@@ -2228,7 +2237,7 @@ impl Render for WorkformeTaskView {
                         self.task.task_type.as_deref() != Some("review")
                             && self.task.pr_number.is_some()
                             && self.task.repo.is_some()
-                            && self.task.pr_status == "approved"
+                            && self.task.inbox_item.as_ref().map(|i| i.status.as_str()) == Some("approved")
                             && self.busy_action.as_deref() != Some("merge"),
                         |el| {
                             let repo = self.task.repo.clone().unwrap();

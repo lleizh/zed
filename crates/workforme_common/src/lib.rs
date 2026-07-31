@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use gpui::{IntoElement, ParentElement, Styled, div};
-use ui::{Label, LabelCommon};
+use ui::{FluentBuilder, Label, LabelCommon, h_flex, v_flex};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ItemKind {
@@ -54,37 +54,86 @@ pub fn status_color(status: &str) -> u32 {
     }
 }
 
-/// status + flags を一括で badge 列として描画する。
-/// open/空 status は表示しない。flags は status と重複するものを除外。
-pub fn render_badges(status: &str, flags: &[String]) -> Vec<gpui::AnyElement> {
-    let mut badges = Vec::new();
-    if !status.is_empty() && status != "open" {
-        badges.push(
-            div()
-                .flex_shrink_0()
-                .px_1()
-                .rounded_sm()
-                .bg(gpui::rgb(status_color(status)))
-                .child(
-                    Label::new(status.to_string())
-                        .size(ui::LabelSize::XSmall)
-                        .color(ui::Color::Default),
+/// item の右側ステータス領域を描画する。
+/// 第一行: greptile + CI/conflict + status badge + run button
+/// 第二行: flags（テキスト色のみ）
+pub fn render_item_status(item: &InboxItem, run_button: Option<gpui::AnyElement>) -> impl IntoElement {
+    let filtered_flags: Vec<&String> = item.flags.iter()
+        .filter(|f| f.as_str() != item.status)
+        .collect();
+
+    v_flex()
+        .flex_shrink_0()
+        .items_end()
+        .justify_center()
+        .gap_0p5()
+        .child(
+            h_flex()
+                .gap_1()
+                .items_center()
+                // greptile score
+                .when(item.greptile_score.is_some(), |el| {
+                    let score = item.greptile_score.unwrap();
+                    let color = if score >= 4 {
+                        0x238636
+                    } else if score >= 3 {
+                        0xd29922
+                    } else {
+                        0xda3633
+                    };
+                    el.child(
+                        Label::new(format!("g:{}/5", score))
+                            .size(ui::LabelSize::XSmall)
+                            .color(ui::Color::Custom(gpui::rgb(color).into())),
+                    )
+                })
+                // CI failure / conflict
+                .when(
+                    item.ci_status.as_deref() == Some("failure") || item.mergeable == Some(false),
+                    |el| {
+                        let (label, color) = if item.ci_status.as_deref() == Some("failure") {
+                            ("CI✗", ui::Color::Error)
+                        } else {
+                            ("⚠conflict", ui::Color::Warning)
+                        };
+                        el.child(
+                            Label::new(label)
+                                .size(ui::LabelSize::XSmall)
+                                .color(color),
+                        )
+                    },
                 )
-                .into_any_element(),
-        );
-    }
-    for f in flags {
-        if f == status {
-            continue;
-        }
-        badges.push(
-            Label::new(f.clone())
-                .size(ui::LabelSize::XSmall)
-                .color(ui::Color::Custom(gpui::rgb(status_color(f)).into()))
-                .into_any_element(),
-        );
-    }
-    badges
+                // status badge
+                .when(!item.status.is_empty() && item.status != "open", |el| {
+                    el.child(
+                        div()
+                            .flex_shrink_0()
+                            .px_1()
+                            .rounded_sm()
+                            .bg(gpui::rgb(status_color(&item.status)))
+                            .child(
+                                Label::new(item.status.clone())
+                                    .size(ui::LabelSize::XSmall)
+                                    .color(ui::Color::Default),
+                            ),
+                    )
+                })
+                // run button
+                .when_some(run_button, |el, btn| el.child(btn)),
+        )
+        // flags（第二行）
+        .when(!filtered_flags.is_empty(), |el| {
+            el.child(
+                h_flex()
+                    .gap_1()
+                    .children(filtered_flags.into_iter().map(|f| {
+                        Label::new(f.clone())
+                            .size(ui::LabelSize::XSmall)
+                            .color(ui::Color::Custom(gpui::rgb(status_color(f)).into()))
+                            .into_any_element()
+                    })),
+            )
+        })
 }
 
 pub fn load_inbox(workforme_root: &Path) -> Inbox {

@@ -272,7 +272,6 @@ impl MyTasksPanel {
                 let entity_clone = entity.clone();
                 let item_key_clone = item_key.clone();
 
-                let badges = workforme_common::render_badges(&item.status, &item.flags);
 
                 sections.push(
                     v_flex()
@@ -295,73 +294,103 @@ impl MyTasksPanel {
                                 .gap_1()
                                 .items_center()
                                 .child(
-                                    div()
-                                        .px_1()
-                                        .rounded_sm()
-                                        .bg(kind_color)
-                                        .child(
-                                            Label::new(kind_label)
-                                                .size(ui::LabelSize::XSmall)
-                                                .color(ui::Color::Default),
-                                        ),
-                                )
-                                .child(
-                                    Label::new(format!("#{}", item.number))
-                                        .size(ui::LabelSize::XSmall)
-                                        .color(ui::Color::Muted),
-                                )
-                                .child(
-                                    div()
+                                    v_flex()
                                         .flex_1()
                                         .min_w_0()
-                                        .overflow_hidden()
+                                        .gap_0p5()
                                         .child(
-                                            Label::new(item.title.clone())
-                                                .size(ui::LabelSize::Small)
-                                                .single_line(),
-                                        ),
-                                )
-                                .when(item.greptile_score.is_some(), |el| {
-                                    let score = item.greptile_score.unwrap();
-                                    let color = if score >= 4 {
-                                        gpui::rgb(0x238636)
-                                    } else if score >= 3 {
-                                        gpui::rgb(0xd29922)
-                                    } else {
-                                        gpui::rgb(0xda3633)
-                                    };
-                                    el.child(
-                                        div()
-                                            .px_1()
-                                            .rounded_sm()
-                                            .child(
-                                                Label::new(format!("g:{}/5", score))
-                                                    .size(ui::LabelSize::XSmall)
-                                                    .color(ui::Color::Custom(color.into())),
-                                            ),
-                                    )
-                                })
-                                .when(
-                                    item.ci_status.as_deref() == Some("failure") || item.mergeable == Some(false),
-                                    |el| {
-                                        let (ci_label, ci_color) = if item.ci_status.as_deref() == Some("failure") {
-                                            ("CI✗", ui::Color::Error)
-                                        } else {
-                                            ("⚠conflict", ui::Color::Warning)
-                                        };
-                                        el.child(
-                                            Label::new(ci_label)
-                                                .size(ui::LabelSize::XSmall)
-                                                .color(ci_color),
+                                            h_flex()
+                                                .gap_1()
+                                                .items_center()
+                                                .child(
+                                                    div()
+                                                        .px_1()
+                                                        .rounded_sm()
+                                                        .bg(kind_color)
+                                                        .child(
+                                                            Label::new(kind_label)
+                                                                .size(ui::LabelSize::XSmall)
+                                                                .color(ui::Color::Default),
+                                                        ),
+                                                )
+                                                .child(
+                                                    Label::new(format!("#{}", item.number))
+                                                        .size(ui::LabelSize::XSmall)
+                                                        .color(ui::Color::Muted),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .flex_1()
+                                                        .min_w_0()
+                                                        .overflow_hidden()
+                                                        .child(
+                                                            Label::new(item.title.clone())
+                                                                .size(ui::LabelSize::Small)
+                                                                .single_line(),
+                                                        ),
+                                                ),
                                         )
-                                    },
+                                        .when(!item.human_reviews.is_empty(), |el| {
+                                            el.child(
+                                                h_flex()
+                                                    .gap_1()
+                                                    .children(item.human_reviews.iter().map(|r| {
+                                                        let icon = match r.state.as_str() {
+                                                            "approved" => "✓",
+                                                            "changes_requested" => "✗",
+                                                            "re_requested" => "⟳",
+                                                            "pending" => "○",
+                                                            _ => "●",
+                                                        };
+                                                        let color = match r.state.as_str() {
+                                                            "approved" => ui::Color::Success,
+                                                            "changes_requested" => ui::Color::Error,
+                                                            "re_requested" => ui::Color::Warning,
+                                                            "pending" => ui::Color::Muted,
+                                                            _ => ui::Color::Muted,
+                                                        };
+                                                        Label::new(format!("{}{}", icon, r.reviewer))
+                                                            .size(ui::LabelSize::XSmall)
+                                                            .color(color)
+                                                            .into_any_element()
+                                                    })),
+                                            )
+                                        })
+                                        .when(!item.summary.is_empty(), |el| {
+                                            el.child(
+                                                Label::new(item.summary.clone())
+                                                    .size(ui::LabelSize::XSmall)
+                                                    .color(ui::Color::Muted)
+                                                    .single_line(),
+                                            )
+                                        }),
                                 )
-                                .children(badges)
-                                .when(
-                                    item.status != "approved"
-                                        && item.status != "merged",
-                                    |el| {
-                                        el.child(
+                                .child({
+                                    let run_button: Option<gpui::AnyElement> = if already_exists {
+                                        Some(
+                                            Label::new("✓")
+                                                .size(ui::LabelSize::XSmall)
+                                                .color(ui::Color::Success)
+                                                .into_any_element(),
+                                        )
+                                    } else if is_running {
+                                        Some(
+                                            div()
+                                                .px_1()
+                                                .rounded_sm()
+                                                .bg(cx.theme().colors().ghost_element_selected)
+                                                .child(
+                                                    Label::new("...")
+                                                        .size(ui::LabelSize::XSmall)
+                                                        .color(ui::Color::Muted),
+                                                )
+                                                .into_any_element(),
+                                        )
+                                    } else {
+                                        let item_clone = item_for_task.clone();
+                                        let entity_clone = entity_clone.clone();
+                                        let key = item_key_clone.clone();
+                                        Some(
                                             div()
                                                 .id(gpui::ElementId::NamedInteger(
                                                     format!("{}-run-{}", id_prefix, repo).into(),
@@ -369,99 +398,39 @@ impl MyTasksPanel {
                                                 ))
                                                 .px_1()
                                                 .rounded_sm()
-                                                .when(already_exists, |el| {
-                                                    el.child(
-                                                        Label::new("✓")
-                                                            .size(ui::LabelSize::XSmall)
-                                                            .color(ui::Color::Success),
-                                                    )
+                                                .cursor_pointer()
+                                                .bg(cx.theme().colors().element_background)
+                                                .hover(|s| {
+                                                    s.bg(cx.theme().colors().ghost_element_selected)
                                                 })
-                                                .when(!already_exists && is_running, |el| {
-                                                    el.bg(cx.theme().colors().ghost_element_selected)
-                                                        .child(
-                                                            Label::new("...")
-                                                                .size(ui::LabelSize::XSmall)
-                                                                .color(ui::Color::Muted),
-                                                        )
+                                                .child(
+                                                    Label::new("▶")
+                                                        .size(ui::LabelSize::XSmall)
+                                                        .color(ui::Color::Accent),
+                                                )
+                                                .on_click(move |_event, _window, cx| {
+                                                    cx.stop_propagation();
+                                                    let item = item_clone.clone();
+                                                    let entity = entity_clone.clone();
+                                                    let key = key.clone();
+                                                    if let Some(panel) = entity.upgrade() {
+                                                        panel.update(cx, |panel, cx| {
+                                                            panel.running.insert(key);
+                                                            cx.notify();
+                                                            let s = WorkformePanelSettings::get_global(cx);
+                                                            let root = PathBuf::from(
+                                                                shellexpand::tilde(&s.workforme_root).to_string(),
+                                                            );
+                                                            create_workforme_task(&item, &root);
+                                                        });
+                                                    }
                                                 })
-                                                .when(!already_exists && !is_running, |el| {
-                                                    let item_clone = item_for_task.clone();
-                                                    let entity_clone = entity_clone.clone();
-                                                    let key = item_key_clone.clone();
-                                                    el.cursor_pointer()
-                                                        .bg(cx.theme().colors().element_background)
-                                                        .hover(|s| {
-                                                            s.bg(cx
-                                                                .theme()
-                                                                .colors()
-                                                                .ghost_element_selected)
-                                                        })
-                                                        .child(
-                                                            Label::new("▶")
-                                                                .size(ui::LabelSize::XSmall)
-                                                                .color(ui::Color::Accent),
-                                                        )
-                                                        .on_click(move |_event, _window, cx| {
-                                                            cx.stop_propagation();
-                                                            let item = item_clone.clone();
-                                                            let entity = entity_clone.clone();
-                                                            let key = key.clone();
-                                                            if let Some(panel) = entity.upgrade() {
-                                                                panel.update(cx, |panel, cx| {
-                                                                    panel.running.insert(key);
-                                                                    cx.notify();
-                                                                    let s = WorkformePanelSettings::get_global(cx);
-                                                                    let root = PathBuf::from(
-                                                                        shellexpand::tilde(
-                                                                            &s.workforme_root,
-                                                                        )
-                                                                        .to_string(),
-                                                                    );
-                                                                    create_workforme_task(
-                                                                        &item, &root,
-                                                                    );
-                                                                });
-                                                            }
-                                                        })
-                                                }),
+                                                .into_any_element(),
                                         )
-                                    },
-                                ),
+                                    };
+                                    workforme_common::render_item_status(item, run_button)
+                                }),
                         )
-                        .when(!item.human_reviews.is_empty(), |el| {
-                            el.child(
-                                h_flex()
-                                    .gap_1()
-                                    .children(item.human_reviews.iter().map(|r| {
-                                        let icon = match r.state.as_str() {
-                                            "approved" => "✓",
-                                            "changes_requested" => "✗",
-                                            "re_requested" => "⟳",
-                                            "pending" => "○",
-                                            _ => "●",
-                                        };
-                                        let color = match r.state.as_str() {
-                                            "approved" => ui::Color::Success,
-                                            "changes_requested" => ui::Color::Error,
-                                            "re_requested" => ui::Color::Warning,
-                                            "pending" => ui::Color::Muted,
-                                            _ => ui::Color::Muted,
-                                        };
-                                        Label::new(format!("{}{}", icon, r.reviewer))
-                                            .size(ui::LabelSize::XSmall)
-                                            .color(color)
-                                            .into_any_element()
-                                    })),
-                            )
-                        })
-                        .when(!item.summary.is_empty(), |el| {
-                            el.child(
-                                Label::new(item.summary.clone())
-                                    .size(ui::LabelSize::XSmall)
-                                    .color(ui::Color::Muted)
-                                    .single_line(),
-                            )
-                        })
                         .into_any_element(),
                 );
             }
