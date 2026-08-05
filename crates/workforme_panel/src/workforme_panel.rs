@@ -101,7 +101,9 @@ pub struct WorkformeTask {
     url: Option<String>,
     pr_url: Option<String>,
     pr_number: Option<u64>,
+    issues_created: Vec<String>,
     inbox_item: Option<workforme_common::InboxItem>,
+    created_inbox_items: Vec<workforme_common::InboxItem>,
     review_posted: bool,
     worktree: Option<String>,
     dynamic_stages: Vec<DynStage>,
@@ -183,14 +185,14 @@ impl WorkformePanel {
                         })
                         .await;
                     let result = this.update(cx, |panel, cx| {
+                        // ディスク上に存在しなくなった ID を deleting_ids から除去
+                        panel.deleting_ids.retain(|id| {
+                            tasks.iter().any(|t| &t.id == id)
+                        });
                         let filtered: Vec<WorkformeTask> = tasks
                             .into_iter()
                             .filter(|t| !panel.deleting_ids.contains(&t.id))
                             .collect();
-                        // ID が磁盘上もう存在しなければ deleting_ids からも除去
-                        panel.deleting_ids.retain(|id| {
-                            filtered.iter().any(|t| &t.id == id)
-                        });
                         if panel.tasks != filtered {
                             // stage 状態変化を検出して通知
                             let notifications =
@@ -711,6 +713,20 @@ fn check_pr_states(tasks: &mut [WorkformeTask], work_dir: &Path) {
                 task.inbox_item = Some((*inbox_item).clone());
             }
         }
+        // analyst task: issues_created を inbox_item として関連付ける
+        if !task.issues_created.is_empty() {
+            let mut created_items = Vec::new();
+            for issue_url in &task.issues_created {
+                if let Some(number) = issue_url.rsplit('/').next().and_then(|s| s.parse::<u64>().ok()) {
+                    if let Some(repo) = task.repo.as_deref() {
+                        if let Some(inbox_item) = inbox_map.get(&(repo.to_string(), number)) {
+                            created_items.push((*inbox_item).clone());
+                        }
+                    }
+                }
+            }
+            task.created_inbox_items = created_items;
+        }
     }
 }
 
@@ -770,6 +786,15 @@ fn parse_task_dir(task_dir: &Path) -> Option<WorkformeTask> {
         .get("review_posted")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let issues_created = state_value
+        .get("issues_created")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
 
     let mut dynamic_stages = Vec::new();
 
@@ -812,7 +837,9 @@ fn parse_task_dir(task_dir: &Path) -> Option<WorkformeTask> {
         url,
         pr_url,
         pr_number,
+        issues_created,
         inbox_item: None,
+        created_inbox_items: Vec::new(),
         review_posted,
         worktree,
         dynamic_stages,
@@ -952,6 +979,32 @@ fn render_task_row(
                 )
                 .when_some(task.inbox_item.as_ref(), |el, inbox_item| {
                     el.child(workforme_common::render_item_status(inbox_item, None))
+                        .when(!inbox_item.review_requested_label && inbox_item.status != "merged" && inbox_item.status != "closed", |el| {
+                            el.child(
+                                Label::new("no-label")
+                                    .size(ui::LabelSize::XSmall)
+                                    .color(ui::Color::Warning)
+                            )
+                        })
+                })
+                .when(!task.created_inbox_items.is_empty(), |el| {
+                    let open_count = task.created_inbox_items.iter().filter(|i| i.status == "open").count();
+                    let closed_count = task.created_inbox_items.iter().filter(|i| i.status == "closed").count();
+                    let other_count = task.created_inbox_items.len() - open_count - closed_count;
+                    let mut parts = Vec::new();
+                    if open_count > 0 { parts.push((format!("{} open", open_count), 0x238636u32)); }
+                    if closed_count > 0 { parts.push((format!("{} closed", closed_count), 0xda3633u32)); }
+                    if other_count > 0 { parts.push((format!("{} other", other_count), 0x848d97u32)); }
+                    el.child(
+                        h_flex().gap_1().children(parts.into_iter().map(|(label, color)| {
+                            div()
+                                .px_1()
+                                .rounded_sm()
+                                .bg(gpui::rgb(color))
+                                .child(Label::new(label).size(ui::LabelSize::XSmall).color(ui::Color::Default))
+                                .into_any_element()
+                        }))
+                    )
                 }),
         )
 }
@@ -987,6 +1040,8 @@ impl PartialEq for WorkformeTask {
             && self.dynamic_stages == other.dynamic_stages
             && self.inbox_item == other.inbox_item
             && self.review_posted == other.review_posted
+            && self.issues_created == other.issues_created
+            && self.created_inbox_items == other.created_inbox_items
     }
 }
 
@@ -1308,6 +1363,7 @@ impl WorkformeTaskView {
                                 let mut tasks = [t.clone()];
                                 check_pr_states(&mut tasks, &work_dir);
                                 t.inbox_item = tasks[0].inbox_item.clone();
+                                t.created_inbox_items = tasks[0].created_inbox_items.clone();
                             }
                             task
                         })
@@ -1315,18 +1371,37 @@ impl WorkformeTaskView {
                     let result = this.update(cx, |view, cx| {
                         if let Some(updated) = updated {
                             if view.task != updated {
-                                // 状態が変わったら busy_action をクリア
                                 if view.busy_action.is_some() {
                                     view.busy_action = None;
                                 }
-                                // review_posted が変わったら review_submitted + findings を更新
                                 if updated.review_posted && !view.review_submitted {
                                     view.review_submitted = true;
-                                    view.review_findings = parse_review_findings(
-                                        &view.workforme_root.join(".work").join(&updated.id),
-                                    );
                                 }
                                 view.task = updated;
+                                cx.notify();
+                            }
+                            // findings は毎回読み直す（selected 状態は保持）
+                            let new_findings = parse_review_findings(
+                                &view.workforme_root.join(".work").join(&view.task.id),
+                            );
+                            if let Some(ref new_f) = new_findings {
+                                if let Some(ref cur_f) = view.review_findings {
+                                    if cur_f.items.len() == new_f.items.len()
+                                        && cur_f.items.iter().zip(new_f.items.iter()).all(|(a, b)| {
+                                            a.file == b.file && a.line == b.line && a.text == b.text
+                                        })
+                                    {
+                                        // 内容同じなら selected を保持
+                                    } else {
+                                        view.review_findings = new_findings;
+                                        cx.notify();
+                                    }
+                                } else {
+                                    view.review_findings = new_findings;
+                                    cx.notify();
+                                }
+                            } else if view.review_findings.is_some() {
+                                view.review_findings = None;
                                 cx.notify();
                             }
                         }
@@ -1602,6 +1677,45 @@ impl Render for WorkformeTaskView {
                                             el.child(workforme_common::render_item_status(inbox_item, None))
                                         })
                                 )
+                            })
+                            // Created issues rows
+                            .when(!self.task.issues_created.is_empty(), |el| {
+                                el.children(self.task.issues_created.iter().enumerate().map(|(i, issue_url)| {
+                                    let url_clone = issue_url.clone();
+                                    let inbox_item = self.task.created_inbox_items.get(i);
+                                    let status = inbox_item.map(|item| item.status.as_str()).unwrap_or("");
+                                    h_flex()
+                                        .gap_1()
+                                        .child(div().w(px(60.)).child(
+                                            Label::new(if i == 0 { "Created" } else { "" })
+                                                .size(ui::LabelSize::XSmall)
+                                                .color(ui::Color::Muted)
+                                        ))
+                                        .child(
+                                            div()
+                                                .id(gpui::ElementId::NamedInteger("wfm-created-issue".into(), i as u64))
+                                                .cursor_pointer()
+                                                .child(Label::new(issue_url.clone()).size(ui::LabelSize::XSmall).color(ui::Color::Accent))
+                                                .on_click(move |_event, _window, cx| {
+                                                    cx.open_url(&url_clone);
+                                                })
+                                        )
+                                        .when(!status.is_empty(), |el| {
+                                            el.child(
+                                                div()
+                                                    .flex_shrink_0()
+                                                    .px_1()
+                                                    .rounded_sm()
+                                                    .bg(gpui::rgb(workforme_common::status_color(status)))
+                                                    .child(
+                                                        Label::new(status.to_string())
+                                                            .size(ui::LabelSize::XSmall)
+                                                            .color(ui::Color::Default)
+                                                    )
+                                            )
+                                        })
+                                        .into_any_element()
+                                }))
                             })
                     ),
             )

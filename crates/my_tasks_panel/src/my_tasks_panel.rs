@@ -191,7 +191,7 @@ impl MyTasksPanel {
         self.items
             .iter()
             .filter(|item| match tab {
-                PanelTab::Mine => item.role == "assignee" || item.role == "reviewer" || item.role == "author",
+                PanelTab::Mine => item.role == "assignee" || item.role == "reviewer" || item.role == "author" || item.role == "created",
                 PanelTab::Team => item.role == "team",
             })
             .collect()

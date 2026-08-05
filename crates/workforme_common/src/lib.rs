@@ -31,6 +31,7 @@ pub struct InboxItem {
     pub human_reviews: Vec<HumanReview>,
     pub ci_status: Option<String>,
     pub mergeable: Option<bool>,
+    pub review_requested_label: bool,
 }
 
 pub struct Inbox {
@@ -213,6 +214,7 @@ fn parse_item(item: &serde_json::Value) -> Option<InboxItem> {
 
     let ci_status = item.get("ci_status").and_then(|v| v.as_str()).map(|s| s.to_string());
     let mergeable = item.get("mergeable").and_then(|v| v.as_bool());
+    let review_requested_label = item.get("review_requested_label").and_then(|v| v.as_bool()).unwrap_or(false);
 
     Some(InboxItem {
         repo,
@@ -228,5 +230,6 @@ fn parse_item(item: &serde_json::Value) -> Option<InboxItem> {
         human_reviews,
         ci_status,
         mergeable,
+        review_requested_label,
     })
 }
