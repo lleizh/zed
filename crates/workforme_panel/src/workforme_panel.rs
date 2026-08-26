@@ -88,6 +88,8 @@ struct DynStage {
     label: String,
     status: StageStatus,
     session_id: Option<String>,
+    runner: Option<String>,
+    tmux_session: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -123,6 +125,20 @@ impl WorkformeTask {
             .iter()
             .rev()
             .find_map(|s| s.session_id.as_deref())
+    }
+
+    fn latest_runner(&self) -> Option<&str> {
+        self.dynamic_stages
+            .iter()
+            .rev()
+            .find_map(|s| s.session_id.as_ref().and_then(|_| s.runner.as_deref()))
+    }
+
+    fn latest_tmux_session(&self) -> Option<&str> {
+        self.dynamic_stages
+            .iter()
+            .rev()
+            .find_map(|s| s.tmux_session.as_deref())
     }
 }
 
@@ -271,6 +287,8 @@ impl WorkformePanel {
         &mut self,
         position: Point<Pixels>,
         session_id: Option<String>,
+        runner: Option<String>,
+        tmux_session: Option<String>,
         repo_path: Option<PathBuf>,
         task_id: String,
         window: &mut Window,
@@ -287,18 +305,31 @@ impl WorkformePanel {
                 let ws = workspace.clone();
                 let sid_clone = sid.clone();
                 let repo_for_term = repo_path.clone();
+                let runner_for_term = runner.clone();
+                let tmux_for_term = tmux_session.clone();
                 menu = menu.custom_entry(
                     move |_window, _cx| Label::new("Open in Terminal").into_any_element(),
                     {
                         let sid = sid_clone;
                         let ws = ws.clone();
                         let cwd = repo_for_term.clone();
+                        let runner = runner_for_term.clone();
+                        let tmux = tmux_for_term.clone();
                         move |window, cx| {
-                            let short_id = sid[..8.min(sid.len())].to_string();
-                            let script = format!(
-                                "claude attach {} 2>/dev/null || claude --resume {}",
-                                short_id, sid
-                            );
+                            let script = match runner.as_deref() {
+                                Some("codex") => {
+                                    let dir = cwd.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| ".".to_string());
+                                    let tmux_name = tmux.as_deref().unwrap_or(&sid);
+                                    format!("tmux attach -t '{}' || codex resume -C '{}' {}", tmux_name, dir, sid)
+                                }
+                                _ => {
+                                    let short_id = sid[..8.min(sid.len())].to_string();
+                                    format!(
+                                        "claude attach {} 2>/dev/null || claude --resume {}",
+                                        short_id, sid
+                                    )
+                                }
+                            };
                             let spawn = SpawnInTerminal {
                                 id: TaskId("workforme-resume".to_string()),
                                 full_label: "workforme: session".to_string(),
@@ -810,6 +841,14 @@ fn parse_task_dir(task_dir: &Path) -> Option<WorkformeTask> {
                     .and_then(|v| v.as_str())
                     .filter(|s| !s.is_empty())
                     .map(|s| s.to_string());
+                let runner = stage_val
+                    .get("runner")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let tmux_session = stage_val
+                    .get("tmux_session")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
                 let status = match status_str {
                     "done" => StageStatus::Done,
                     "failed" => StageStatus::Failed,
@@ -822,6 +861,8 @@ fn parse_task_dir(task_dir: &Path) -> Option<WorkformeTask> {
                     label,
                     status,
                     session_id,
+                    runner,
+                    tmux_session,
                 });
             }
         }
@@ -855,6 +896,8 @@ fn render_task_row(
     cx: &App,
 ) -> impl IntoElement {
     let session_id = task.latest_session_id().map(|s| s.to_string());
+    let runner = task.latest_runner().map(|s| s.to_string());
+    let tmux_session = task.latest_tmux_session().map(|s| s.to_string());
     let task_id = task.id.clone();
     let task_clone = task.clone();
     let workspace = workspace.clone();
@@ -862,6 +905,8 @@ fn render_task_row(
     let workforme_root = workforme_root.to_path_buf();
     let cwd = task.worktree.as_ref().map(|w| PathBuf::from(w));
     let ctx_session_id = session_id.clone();
+    let ctx_runner = runner.clone();
+    let ctx_tmux = tmux_session.clone();
     let ctx_repo_path = cwd.clone();
 
     v_flex()
@@ -879,6 +924,8 @@ fn render_task_row(
         .on_mouse_down(MouseButton::Right, {
             let panel = panel.clone();
             let ctx_session_id = ctx_session_id.clone();
+            let ctx_runner = ctx_runner.clone();
+            let ctx_tmux = ctx_tmux.clone();
             let ctx_repo_path = ctx_repo_path.clone();
             let ctx_task_id = task_id.clone();
             move |event, window, cx| {
@@ -887,6 +934,8 @@ fn render_task_row(
                         panel.deploy_context_menu(
                             event.position,
                             ctx_session_id.clone(),
+                            ctx_runner.clone(),
+                            ctx_tmux.clone(),
                             ctx_repo_path.clone(),
                             ctx_task_id.clone(),
                             window,
@@ -1111,6 +1160,7 @@ pub async fn load(
 #[derive(Debug, Clone, PartialEq)]
 struct ReviewFindings {
     verdict: String,
+    summary: String,
     items: Vec<ReviewFinding>,
 }
 
@@ -1155,11 +1205,11 @@ fn submit_review(
     let root = workforme_root.clone();
     let repo = repo.to_string();
     let event = event.to_string();
-    let comments: Vec<(String, u64, String)> = entity
+    let (comments, summary) = entity
         .upgrade()
         .map(|view| {
-            view.read(cx)
-                .review_findings
+            let v = view.read(cx);
+            let items: Vec<(String, u64, String)> = v.review_findings
                 .as_ref()
                 .map(|r| {
                     r.items
@@ -1168,7 +1218,15 @@ fn submit_review(
                         .map(|f| (f.file.clone(), f.line, f.text.clone()))
                         .collect()
                 })
-                .unwrap_or_default()
+                .unwrap_or_default();
+            let sum = if v.summary_selected {
+                v.review_findings.as_ref()
+                    .map(|r| r.summary.clone())
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            (items, sum)
         })
         .unwrap_or_default();
     std::thread::spawn(move || {
@@ -1207,11 +1265,14 @@ fn submit_review(
             .filter(|(file, line, _)| file.is_empty() || *line == 0)
             .map(|(_, _, text)| text.clone())
             .collect();
-        let body = if body_comments.is_empty() {
-            String::new()
-        } else {
-            body_comments.join("\n\n")
-        };
+        let mut body_parts: Vec<String> = Vec::new();
+        if !summary.is_empty() {
+            body_parts.push(summary);
+        }
+        if !body_comments.is_empty() {
+            body_parts.push(body_comments.join("\n\n"));
+        }
+        let body = body_parts.join("\n\n---\n\n");
         let mut review_json = serde_json::json!({
             "event": event,
             "commit_id": commit_id,
@@ -1306,6 +1367,7 @@ fn parse_review_findings(task_dir: &Path) -> Option<ReviewFindings> {
         .unwrap_or_default();
 
     let verdict = val.get("verdict").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let summary = val.get("summary").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let mut items = Vec::new();
     for (severity, key) in [("critical", "critical"), ("informational", "informational")] {
         if let Some(arr) = val.get(key).and_then(|v| v.as_array()) {
@@ -1325,7 +1387,7 @@ fn parse_review_findings(task_dir: &Path) -> Option<ReviewFindings> {
             }
         }
     }
-    Some(ReviewFindings { verdict, items })
+    Some(ReviewFindings { verdict, summary, items })
 }
 
 pub struct WorkformeTaskView {
@@ -1336,6 +1398,8 @@ pub struct WorkformeTaskView {
     busy_action: Option<String>,
     review_findings: Option<ReviewFindings>,
     expanded_findings: std::collections::HashSet<usize>,
+    summary_selected: bool,
+    summary_expanded: bool,
     review_submitted: bool,
     _poll_task: Task<()>,
 }
@@ -1386,7 +1450,8 @@ impl WorkformeTaskView {
                             );
                             if let Some(ref new_f) = new_findings {
                                 if let Some(ref cur_f) = view.review_findings {
-                                    if cur_f.items.len() == new_f.items.len()
+                                    if cur_f.summary == new_f.summary
+                                        && cur_f.items.len() == new_f.items.len()
                                         && cur_f.items.iter().zip(new_f.items.iter()).all(|(a, b)| {
                                             a.file == b.file && a.line == b.line && a.text == b.text
                                         })
@@ -1394,6 +1459,7 @@ impl WorkformeTaskView {
                                         // 内容同じなら selected を保持
                                     } else {
                                         view.review_findings = new_findings;
+                                        view.summary_selected = false;
                                         cx.notify();
                                     }
                                 } else {
@@ -1426,6 +1492,8 @@ impl WorkformeTaskView {
             busy_action: None,
             review_findings,
             expanded_findings: std::collections::HashSet::new(),
+            summary_selected: false,
+            summary_expanded: false,
             review_submitted,
             _poll_task: poll_task,
         }
@@ -1556,15 +1624,34 @@ impl WorkformeTaskView {
 
     fn open_session(
         &self,
-        short_id: &str,
+        session_id: &str,
         stage_label: &str,
+        runner: Option<&str>,
+        tmux_session: Option<&str>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let label = format!("[{}]{}", stage_label, &self.task.id);
+        let (cmd, args) = match runner {
+            Some("codex") => {
+                let tmux_name = tmux_session.unwrap_or(session_id);
+                (
+                    "tmux",
+                    vec![
+                        "attach".to_string(),
+                        "-t".to_string(),
+                        tmux_name.to_string(),
+                    ],
+                )
+            }
+            _ => (
+                "claude",
+                vec!["attach".to_string(), session_id[..8.min(session_id.len())].to_string()],
+            ),
+        };
         self.spawn_command(
-            "claude",
-            vec!["attach".to_string(), short_id.to_string()],
+            cmd,
+            args,
             &label,
             self.repo_path(),
             window,
@@ -1796,9 +1883,17 @@ impl Render for WorkformeTaskView {
                             );
                         }
                         // Attach/Resume button
-                        if let Some(ref sid) = dyn_stage.session_id {
+                        let is_codex = dyn_stage.runner.as_deref() == Some("codex");
+                        let has_session = if is_codex {
+                            dyn_stage.tmux_session.is_some()
+                        } else {
+                            dyn_stage.session_id.is_some()
+                        };
+                        if has_session {
                             let entity_for_attach = entity.clone();
-                            let sid = sid.clone();
+                            let sid = dyn_stage.session_id.clone().unwrap_or_default();
+                            let stage_runner = dyn_stage.runner.clone();
+                            let stage_tmux = dyn_stage.tmux_session.clone();
                             let stage_label_for_attach = dyn_stage.label.clone();
                             let is_running = matches!(dyn_stage.status, StageStatus::InProgress(_));
                             let btn_label = if is_running { "⏎ Attach" } else { "⏎ Resume" };
@@ -1814,10 +1909,12 @@ impl Render for WorkformeTaskView {
                                     .child(Label::new(btn_label).size(ui::LabelSize::XSmall).color(btn_color))
                                     .on_click(move |_event, window, cx| {
                                         if let Some(view) = entity_for_attach.upgrade() {
-                                            let short_id = sid[..8.min(sid.len())].to_string();
+                                            let session_id = sid.clone();
                                             let stage_label = stage_label_for_attach.clone();
+                                            let runner = stage_runner.clone();
+                                            let tmux = stage_tmux.clone();
                                             view.update(cx, |view, cx| {
-                                                view.open_session(&short_id, &stage_label, window, cx);
+                                                view.open_session(&session_id, &stage_label, runner.as_deref(), tmux.as_deref(), window, cx);
                                             });
                                         }
                                     }),
@@ -1900,7 +1997,7 @@ impl Render for WorkformeTaskView {
                     }))
             })
             // Review findings (pr-review workflow only)
-            .when(self.review_findings.as_ref().map_or(false, |r| !r.items.is_empty()), |el| {
+            .when(self.review_findings.as_ref().map_or(false, |r| !r.items.is_empty() || !r.summary.is_empty()), |el| {
                 let review = self.review_findings.as_ref().unwrap();
                 let entity = cx.entity().downgrade();
                 let (verdict_label, verdict_color) = match review.verdict.as_str() {
@@ -1908,7 +2005,7 @@ impl Render for WorkformeTaskView {
                     "REQUEST_CHANGES" => ("REQUEST_CHANGES", ui::Color::Error),
                     _ => ("COMMENT", ui::Color::Warning),
                 };
-                let has_selected = review.items.iter().any(|f| f.selected);
+                let has_selected = self.summary_selected || review.items.iter().any(|f| f.selected);
                 let submitted = self.review_submitted;
                 el.child(div().h(px(1.)).bg(cx.theme().colors().border))
                     .child(
@@ -1931,6 +2028,96 @@ impl Render for WorkformeTaskView {
                                             .color(verdict_color),
                                     ),
                             )
+                            .when(!review.summary.is_empty(), |el| {
+                                let summary_selected = self.summary_selected;
+                                let summary_expanded = self.summary_expanded;
+                                let summary_text = review.summary.clone();
+                                let entity_for_summary_check = entity.clone();
+                                let entity_for_summary_toggle = entity.clone();
+                                el.child(
+                                    v_flex()
+                                        .py_0p5()
+                                        .gap_0p5()
+                                        .child(
+                                            h_flex()
+                                                .id("wfm-summary-row")
+                                                .gap_1()
+                                                .items_center()
+                                                .cursor_pointer()
+                                                .hover(|s| s.bg(cx.theme().colors().ghost_element_hover))
+                                                .on_click(move |_event, _window, cx| {
+                                                    if let Some(view) = entity_for_summary_toggle.upgrade() {
+                                                        view.update(cx, |view, cx| {
+                                                            view.summary_expanded = !view.summary_expanded;
+                                                            cx.notify();
+                                                        });
+                                                    }
+                                                })
+                                                .child(
+                                                    div()
+                                                        .id("wfm-summary-check")
+                                                        .w(px(14.))
+                                                        .h(px(14.))
+                                                        .rounded_sm()
+                                                        .border_1()
+                                                        .border_color(cx.theme().colors().border)
+                                                        .when(summary_selected, |el| el.bg(cx.theme().colors().element_selected))
+                                                        .cursor_pointer()
+                                                        .flex_none()
+                                                        .items_center()
+                                                        .justify_center()
+                                                        .when(summary_selected, |el| {
+                                                            el.child(
+                                                                Label::new("✓")
+                                                                    .size(ui::LabelSize::XSmall)
+                                                                    .color(ui::Color::Default),
+                                                            )
+                                                        })
+                                                        .on_click(move |_event, _window, cx| {
+                                                            cx.stop_propagation();
+                                                            if let Some(view) = entity_for_summary_check.upgrade() {
+                                                                view.update(cx, |view, cx| {
+                                                                    view.summary_selected = !view.summary_selected;
+                                                                    cx.notify();
+                                                                });
+                                                            }
+                                                        }),
+                                                )
+                                                .child(
+                                                    Label::new(if summary_expanded { "▼" } else { "▶" })
+                                                        .size(ui::LabelSize::XSmall)
+                                                        .color(ui::Color::Muted),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .flex_1()
+                                                        .min_w_0()
+                                                        .overflow_hidden()
+                                                        .child(
+                                                            Label::new("Summary")
+                                                                .size(ui::LabelSize::XSmall)
+                                                                .color(ui::Color::Default)
+                                                                .single_line(),
+                                                        ),
+                                                ),
+                                        )
+                                        .when(summary_expanded, |el| {
+                                            el.child(
+                                                div()
+                                                    .ml_4()
+                                                    .px_2()
+                                                    .py_1()
+                                                    .rounded_md()
+                                                    .bg(cx.theme().colors().surface_background)
+                                                    .child(
+                                                        Label::new(summary_text)
+                                                            .size(ui::LabelSize::XSmall)
+                                                            .color(ui::Color::Default),
+                                                    ),
+                                            )
+                                        }),
+                                )
+                            })
                             .children(review.items.iter().enumerate().map(|(i, finding)| {
                                 let severity_color = if finding.severity == "critical" {
                                     ui::Color::Error
