@@ -113,6 +113,7 @@ impl MyTasksPanel {
                             panel.items = items;
                             panel.existing_urls = existing;
                             panel.updated_at = updated_at;
+                            panel.running.clear();
                             cx.notify();
                         }
                     });
@@ -318,6 +319,13 @@ impl MyTasksPanel {
                                                         .size(ui::LabelSize::XSmall)
                                                         .color(ui::Color::Muted),
                                                 )
+                                                .when_some(item.author.as_ref(), |el, author| {
+                                                    el.child(
+                                                        Label::new(author.clone())
+                                                            .size(ui::LabelSize::XSmall)
+                                                            .color(ui::Color::Accent),
+                                                    )
+                                                })
                                                 .child(
                                                     div()
                                                         .flex_1()
@@ -328,7 +336,15 @@ impl MyTasksPanel {
                                                                 .size(ui::LabelSize::Small)
                                                                 .single_line(),
                                                         ),
-                                                ),
+                                                )
+                                                .when_some(item.created_at.as_ref(), |el, created| {
+                                                    let short = created.chars().take(10).collect::<String>();
+                                                    el.child(
+                                                        Label::new(short)
+                                                            .size(ui::LabelSize::XSmall)
+                                                            .color(ui::Color::Muted),
+                                                    )
+                                                }),
                                         )
                                         .when(!item.human_reviews.is_empty(), |el| {
                                             el.child(
