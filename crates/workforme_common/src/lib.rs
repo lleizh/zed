@@ -32,6 +32,8 @@ pub struct InboxItem {
     pub ci_status: Option<String>,
     pub mergeable: Option<bool>,
     pub review_requested_label: bool,
+    pub author: Option<String>,
+    pub created_at: Option<String>,
 }
 
 pub struct Inbox {
@@ -215,6 +217,8 @@ fn parse_item(item: &serde_json::Value) -> Option<InboxItem> {
     let ci_status = item.get("ci_status").and_then(|v| v.as_str()).map(|s| s.to_string());
     let mergeable = item.get("mergeable").and_then(|v| v.as_bool());
     let review_requested_label = item.get("review_requested_label").and_then(|v| v.as_bool()).unwrap_or(false);
+    let author = item.get("author").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let created_at = item.get("created_at").and_then(|v| v.as_str()).map(|s| s.to_string());
 
     Some(InboxItem {
         repo,
@@ -231,5 +235,7 @@ fn parse_item(item: &serde_json::Value) -> Option<InboxItem> {
         ci_status,
         mergeable,
         review_requested_label,
+        author,
+        created_at,
     })
 }
