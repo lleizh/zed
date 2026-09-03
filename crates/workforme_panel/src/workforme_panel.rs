@@ -55,6 +55,14 @@ const WORKFORME_PANEL_KEY: &str = "WorkformePanel";
 actions!(workforme_panel, [ToggleFocus]);
 
 /// stage key → 表示ラベル
+fn tmux_session_exists(name: &str) -> bool {
+    std::process::Command::new("tmux")
+        .args(["has-session", "-t", name])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 fn stage_label(key: &str) -> &str {
     match key {
         "plan" => "Plan",
@@ -320,7 +328,11 @@ impl WorkformePanel {
                                 Some("codex") => {
                                     let dir = cwd.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| ".".to_string());
                                     let tmux_name = tmux.as_deref().unwrap_or(&sid);
-                                    format!("tmux attach -t '{}' || codex resume -C '{}' {}", tmux_name, dir, sid)
+                                    if tmux_session_exists(tmux_name) {
+                                        format!("tmux attach -t '{}'", tmux_name)
+                                    } else {
+                                        format!("codex resume -C '{}' {}", dir, sid)
+                                    }
                                 }
                                 _ => {
                                     let short_id = sid[..8.min(sid.len())].to_string();
@@ -1635,14 +1647,12 @@ impl WorkformeTaskView {
         let (cmd, args) = match runner {
             Some("codex") => {
                 let tmux_name = tmux_session.unwrap_or(session_id);
-                (
-                    "tmux",
-                    vec![
-                        "attach".to_string(),
-                        "-t".to_string(),
-                        tmux_name.to_string(),
-                    ],
-                )
+                if tmux_session_exists(tmux_name) {
+                    ("tmux", vec!["attach".to_string(), "-t".to_string(), tmux_name.to_string()])
+                } else {
+                    let dir = self.repo_path().map(|p| p.display().to_string()).unwrap_or_else(|| ".".to_string());
+                    ("codex", vec!["resume".to_string(), "-C".to_string(), dir, session_id.to_string()])
+                }
             }
             _ => (
                 "claude",
