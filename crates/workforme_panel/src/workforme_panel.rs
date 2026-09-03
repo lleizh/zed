@@ -331,7 +331,7 @@ impl WorkformePanel {
                                     if tmux_session_exists(tmux_name) {
                                         format!("tmux attach -t '{}'", tmux_name)
                                     } else {
-                                        format!("codex resume -C '{}' {}", dir, sid)
+                                        format!("codex resume --dangerously-bypass-approvals-and-sandbox -C '{}' {}", dir, sid)
                                     }
                                 }
                                 _ => {
@@ -1651,7 +1651,7 @@ impl WorkformeTaskView {
                     ("tmux", vec!["attach".to_string(), "-t".to_string(), tmux_name.to_string()])
                 } else {
                     let dir = self.repo_path().map(|p| p.display().to_string()).unwrap_or_else(|| ".".to_string());
-                    ("codex", vec!["resume".to_string(), "-C".to_string(), dir, session_id.to_string()])
+                    ("codex", vec!["resume".to_string(), "--dangerously-bypass-approvals-and-sandbox".to_string(), "-C".to_string(), dir, session_id.to_string()])
                 }
             }
             _ => (
