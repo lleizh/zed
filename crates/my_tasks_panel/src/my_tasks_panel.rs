@@ -113,7 +113,12 @@ impl MyTasksPanel {
                             panel.items = items;
                             panel.existing_urls = existing;
                             panel.updated_at = updated_at;
-                            panel.running.clear();
+                            panel.running.retain(|key| {
+                                !panel.items.iter().any(|i| {
+                                    format!("{}/{}", i.repo, i.number) == *key
+                                        && panel.existing_urls.contains(&i.url)
+                                })
+                            });
                             cx.notify();
                         }
                     });

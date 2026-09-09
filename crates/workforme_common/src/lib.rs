@@ -32,6 +32,7 @@ pub struct InboxItem {
     pub ci_status: Option<String>,
     pub mergeable: Option<bool>,
     pub review_requested_label: bool,
+    pub hotfix: bool,
     pub author: Option<String>,
     pub created_at: Option<String>,
 }
@@ -74,6 +75,21 @@ pub fn render_item_status(item: &InboxItem, run_button: Option<gpui::AnyElement>
             h_flex()
                 .gap_1()
                 .items_center()
+                // hotfix badge
+                .when(item.hotfix, |el| {
+                    el.child(
+                        div()
+                            .flex_shrink_0()
+                            .px_1()
+                            .rounded_sm()
+                            .bg(gpui::rgb(0xda3633))
+                            .child(
+                                Label::new("hotfix")
+                                    .size(ui::LabelSize::XSmall)
+                                    .color(ui::Color::Default),
+                            ),
+                    )
+                })
                 // greptile score
                 .when(item.greptile_score.is_some(), |el| {
                     let score = item.greptile_score.unwrap();
@@ -217,6 +233,7 @@ fn parse_item(item: &serde_json::Value) -> Option<InboxItem> {
     let ci_status = item.get("ci_status").and_then(|v| v.as_str()).map(|s| s.to_string());
     let mergeable = item.get("mergeable").and_then(|v| v.as_bool());
     let review_requested_label = item.get("review_requested_label").and_then(|v| v.as_bool()).unwrap_or(false);
+    let hotfix = item.get("hotfix").and_then(|v| v.as_bool()).unwrap_or(false);
     let author = item.get("author").and_then(|v| v.as_str()).map(|s| s.to_string());
     let created_at = item.get("created_at").and_then(|v| v.as_str()).map(|s| s.to_string());
 
@@ -235,6 +252,7 @@ fn parse_item(item: &serde_json::Value) -> Option<InboxItem> {
         ci_status,
         mergeable,
         review_requested_label,
+        hotfix,
         author,
         created_at,
     })
