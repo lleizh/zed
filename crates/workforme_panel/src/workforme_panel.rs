@@ -228,13 +228,13 @@ impl WorkformePanel {
                                 if should_notify {
                                     if let Some(ws) = panel.workspace.upgrade() {
                                         ws.update(cx, |ws, cx| {
-                                            for msg in &notifications {
+                                            for notif in &notifications {
                                                 ws.show_toast(
                                                     Toast::new(
                                                         NotificationId::named(
-                                                            format!("wfm-stage-{}", &msg[..20.min(msg.len())]).into(),
+                                                            format!("wfm-stage-{}", &notif.message[..20.min(notif.message.len())]).into(),
                                                         ),
-                                                        msg.clone(),
+                                                        notif.message.clone(),
                                                     )
                                                     .autohide(),
                                                     cx,
@@ -242,8 +242,8 @@ impl WorkformePanel {
                                             }
                                         });
                                     }
-                                    for msg in &notifications {
-                                        send_system_notification(msg);
+                                    for notif in &notifications {
+                                        send_system_notification(notif, &panel.workforme_root);
                                     }
                                 }
                             }
@@ -671,7 +671,8 @@ impl Render for WorkformePanel {
     }
 }
 
-fn send_system_notification(message: &str) {
+fn send_system_notification(notif: &StageNotification, workforme_root: &Path) {
+    let message = &notif.message;
     let escaped = message.replace('\\', "\\\\").replace('"', "\\\"");
     std::process::Command::new("osascript")
         .args([
@@ -683,18 +684,72 @@ fn send_system_notification(message: &str) {
         ])
         .spawn()
         .ok();
+
+    // Bark push notification
+    let bark_key = std::process::Command::new("python3")
+        .arg(workforme_root.join("scripts/state.py"))
+        .arg("config")
+        .arg("bark_key")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if !bark_key.is_empty() {
+        let (title, body) = message.split_once('\n').unwrap_or((message, ""));
+        let group = if notif.repo.is_empty() { "workforme" } else { &notif.repo };
+        let sound = if notif.is_failure { "alarm" } else { "minuet" };
+        let mut payload = format!(
+            r#"{{"device_key":"{}","title":"{}","body":"{}","group":"{}","level":"timeSensitive","sound":"{}","isArchive":"1""#,
+            bark_key,
+            title.replace('"', "\\\""),
+            body.replace('"', "\\\""),
+            group.replace('"', "\\\""),
+            sound,
+        );
+        if let Some(u) = &notif.url {
+            payload.push_str(&format!(r#","url":"{}""#, u.replace('"', "\\\"")));
+        }
+        payload.push('}');
+        std::process::Command::new("curl")
+            .args(["-s", "-o", "/dev/null", "-X", "POST",
+                   "https://api.day.app/push",
+                   "-H", "Content-Type: application/json",
+                   "-d", &payload])
+            .spawn()
+            .ok();
+    }
+}
+
+struct StageNotification {
+    message: String,
+    repo: String,
+    url: Option<String>,
+    is_failure: bool,
 }
 
 fn detect_stage_completions(
     old_tasks: &[WorkformeTask],
     new_tasks: &[WorkformeTask],
-) -> Vec<String> {
+) -> Vec<StageNotification> {
     let mut notifications = Vec::new();
     for new_task in new_tasks {
         let Some(old_task) = old_tasks.iter().find(|t| t.id == new_task.id) else {
             continue;
         };
-        let short_id = &new_task.id[..8.min(new_task.id.len())];
+        let repo = new_task.repo.clone().unwrap_or_default();
+        let task_label = if let Some(pr) = new_task.pr_number {
+            format!("{}#{}", repo, pr)
+        } else {
+            let number = new_task.id.rsplit('-').next().and_then(|s| s.parse::<u64>().ok());
+            if let Some(n) = number {
+                format!("{}#{}", repo, n)
+            } else {
+                new_task.id.clone()
+            }
+        };
+        let url = new_task.pr_url.clone().or_else(|| new_task.url.clone());
         for (i, new_dyn) in new_task.dynamic_stages.iter().enumerate() {
             let old_dyn = old_task.dynamic_stages.get(i);
             let was_in_progress =
@@ -702,12 +757,20 @@ fn detect_stage_completions(
             if was_in_progress {
                 match new_dyn.status {
                     StageStatus::Done => {
-                        notifications
-                            .push(format!("✓ [{}] {} completed", short_id, new_dyn.label));
+                        notifications.push(StageNotification {
+                            message: format!("✓ [{}] {} completed\n{}", task_label, new_dyn.label, new_task.title),
+                            repo: repo.clone(),
+                            url: url.clone(),
+                            is_failure: false,
+                        });
                     }
                     StageStatus::Failed => {
-                        notifications
-                            .push(format!("✗ [{}] {} failed", short_id, new_dyn.label));
+                        notifications.push(StageNotification {
+                            message: format!("✗ [{}] {} failed\n{}", task_label, new_dyn.label, new_task.title),
+                            repo: repo.clone(),
+                            url: url.clone(),
+                            is_failure: true,
+                        });
                     }
                     _ => {}
                 }
@@ -1596,7 +1659,6 @@ impl WorkformeTaskView {
                                     .autohide(),
                                     cx,
                                 );
-                                send_system_notification(&message);
                             }
                         })
                         .ok();
@@ -2459,6 +2521,82 @@ impl Render for WorkformeTaskView {
                             }
                         },
                     )
+                    // Conflict notify button
+                    .when(
+                        self.task.pr_number.is_some()
+                            && self.task.repo.is_some()
+                            && self.task.inbox_item.as_ref().map(|i| i.mergeable) == Some(Some(false))
+                            && self.busy_action.as_deref() != Some("conflict_notify"),
+                        |el| {
+                            let repo = self.task.repo.clone().unwrap();
+                            let pr_number = self.task.pr_number.unwrap();
+                            let pr_author = self.task.inbox_item.as_ref().and_then(|i| i.author.clone()).unwrap_or_default();
+                            let workforme_root = self.workforme_root.clone();
+                            let entity = cx.entity().downgrade();
+                            el.child(
+                                div()
+                                    .id("wfm-action-conflict-notify")
+                                    .px_2()
+                                    .py_0p5()
+                                    .rounded_md()
+                                    .bg(cx.theme().colors().ghost_element_hover)
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(cx.theme().colors().ghost_element_selected))
+                                    .child(Label::new("⚠ Conflict").size(ui::LabelSize::Small).color(ui::Color::Warning))
+                                    .on_click(move |_event, _window, cx| {
+                                        if let Some(view) = entity.upgrade() {
+                                            view.update(cx, |view, cx| {
+                                                view.busy_action = Some("conflict_notify".to_string());
+                                                cx.notify();
+                                            });
+                                        }
+                                        let workforme_root_clone = workforme_root.clone();
+                                        let repo_clone = repo.clone();
+                                        let author = pr_author.clone();
+                                        std::thread::spawn(move || {
+                                            let org = std::process::Command::new("python3")
+                                                .arg(workforme_root_clone.join("scripts/state.py"))
+                                                .arg("config")
+                                                .arg("github_org")
+                                                .output()
+                                                .ok()
+                                                .and_then(|o| String::from_utf8(o.stdout).ok())
+                                                .unwrap_or_default()
+                                                .trim()
+                                                .to_string();
+                                            let body = if author.is_empty() {
+                                                "この PR に conflict が発生しています。マージ前に解消をお願いします。".to_string()
+                                            } else {
+                                                format!("@{} この PR に conflict が発生しています。マージ前に解消をお願いします。", author)
+                                            };
+                                            let result = std::process::Command::new("gh")
+                                                .args([
+                                                    "pr", "comment", &pr_number.to_string(),
+                                                    "--repo", &format!("{}/{}", org, repo_clone),
+                                                    "--body", &body,
+                                                ])
+                                                .output();
+                                            if let Ok(output) = result {
+                                                if !output.status.success() {
+                                                    log::error!("workforme: conflict notify failed: {}", String::from_utf8_lossy(&output.stderr));
+                                                }
+                                            }
+                                        });
+                                    }),
+                            )
+                        },
+                    )
+                    .when(self.busy_action.as_deref() == Some("conflict_notify"), |el| {
+                        el.child(
+                            div()
+                                .id("wfm-action-conflict-busy")
+                                .px_2()
+                                .py_0p5()
+                                .rounded_md()
+                                .bg(cx.theme().colors().ghost_element_selected)
+                                .child(Label::new("Notifying...").size(ui::LabelSize::Small).color(ui::Color::Muted)),
+                        )
+                    })
                     // Approve button (for review tasks with pr_number)
                     .when(
                         self.task.task_type.as_deref() == Some("review")

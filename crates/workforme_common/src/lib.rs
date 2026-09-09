@@ -33,6 +33,7 @@ pub struct InboxItem {
     pub mergeable: Option<bool>,
     pub review_requested_label: bool,
     pub hotfix: bool,
+    pub release: bool,
     pub author: Option<String>,
     pub created_at: Option<String>,
 }
@@ -85,6 +86,21 @@ pub fn render_item_status(item: &InboxItem, run_button: Option<gpui::AnyElement>
                             .bg(gpui::rgb(0xda3633))
                             .child(
                                 Label::new("hotfix")
+                                    .size(ui::LabelSize::XSmall)
+                                    .color(ui::Color::Default),
+                            ),
+                    )
+                })
+                // release badge
+                .when(item.release, |el| {
+                    el.child(
+                        div()
+                            .flex_shrink_0()
+                            .px_1()
+                            .rounded_sm()
+                            .bg(gpui::rgb(0x8957e5))
+                            .child(
+                                Label::new("release")
                                     .size(ui::LabelSize::XSmall)
                                     .color(ui::Color::Default),
                             ),
@@ -234,6 +250,7 @@ fn parse_item(item: &serde_json::Value) -> Option<InboxItem> {
     let mergeable = item.get("mergeable").and_then(|v| v.as_bool());
     let review_requested_label = item.get("review_requested_label").and_then(|v| v.as_bool()).unwrap_or(false);
     let hotfix = item.get("hotfix").and_then(|v| v.as_bool()).unwrap_or(false);
+    let release = item.get("release").and_then(|v| v.as_bool()).unwrap_or(false);
     let author = item.get("author").and_then(|v| v.as_str()).map(|s| s.to_string());
     let created_at = item.get("created_at").and_then(|v| v.as_str()).map(|s| s.to_string());
 
@@ -253,6 +270,7 @@ fn parse_item(item: &serde_json::Value) -> Option<InboxItem> {
         mergeable,
         review_requested_label,
         hotfix,
+        release,
         author,
         created_at,
     })
