@@ -671,7 +671,7 @@ impl Render for WorkformePanel {
     }
 }
 
-fn send_system_notification(notif: &StageNotification, workforme_root: &Path) {
+fn send_system_notification(notif: &StageNotification, _workforme_root: &Path) {
     let message = &notif.message;
 
     // macOS notification
@@ -687,28 +687,10 @@ fn send_system_notification(notif: &StageNotification, workforme_root: &Path) {
         .spawn()
         .ok();
 
-    // External notification via notify.sh
-    let script = workforme_root.join("scripts/notify.sh");
-    if script.exists() {
-        let (title, body) = message.split_once('\n').unwrap_or((message, ""));
-        let mut cmd = std::process::Command::new("bash");
-        cmd.arg(&script)
-            .arg("--title").arg(title)
-            .arg("--body").arg(body)
-            .arg("--group").arg(if notif.repo.is_empty() { "workforme" } else { &notif.repo })
-            .arg("--level").arg(if notif.is_failure { "failure" } else { "success" });
-        if let Some(u) = &notif.url {
-            cmd.arg("--url").arg(u);
-        }
-        cmd.spawn().ok();
-    }
 }
 
 struct StageNotification {
     message: String,
-    repo: String,
-    url: Option<String>,
-    is_failure: bool,
 }
 
 fn detect_stage_completions(
@@ -731,7 +713,6 @@ fn detect_stage_completions(
                 new_task.id.clone()
             }
         };
-        let url = new_task.pr_url.clone().or_else(|| new_task.url.clone());
         for (i, new_dyn) in new_task.dynamic_stages.iter().enumerate() {
             let old_dyn = old_task.dynamic_stages.get(i);
             let was_in_progress =
@@ -741,17 +722,11 @@ fn detect_stage_completions(
                     StageStatus::Done => {
                         notifications.push(StageNotification {
                             message: format!("✓ [{}] {} completed\n{}", task_label, new_dyn.label, new_task.title),
-                            repo: repo.clone(),
-                            url: url.clone(),
-                            is_failure: false,
                         });
                     }
                     StageStatus::Failed => {
                         notifications.push(StageNotification {
                             message: format!("✗ [{}] {} failed\n{}", task_label, new_dyn.label, new_task.title),
-                            repo: repo.clone(),
-                            url: url.clone(),
-                            is_failure: true,
                         });
                     }
                     _ => {}
