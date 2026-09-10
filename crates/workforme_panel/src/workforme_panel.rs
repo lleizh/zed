@@ -673,6 +673,8 @@ impl Render for WorkformePanel {
 
 fn send_system_notification(notif: &StageNotification, workforme_root: &Path) {
     let message = &notif.message;
+
+    // macOS notification
     let escaped = message.replace('\\', "\\\\").replace('"', "\\\"");
     std::process::Command::new("osascript")
         .args([
@@ -685,40 +687,20 @@ fn send_system_notification(notif: &StageNotification, workforme_root: &Path) {
         .spawn()
         .ok();
 
-    // Bark push notification
-    let bark_key = std::process::Command::new("python3")
-        .arg(workforme_root.join("scripts/state.py"))
-        .arg("config")
-        .arg("bark_key")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    if !bark_key.is_empty() {
+    // External notification via notify.sh
+    let script = workforme_root.join("scripts/notify.sh");
+    if script.exists() {
         let (title, body) = message.split_once('\n').unwrap_or((message, ""));
-        let group = if notif.repo.is_empty() { "workforme" } else { &notif.repo };
-        let sound = if notif.is_failure { "alarm" } else { "minuet" };
-        let mut payload = format!(
-            r#"{{"device_key":"{}","title":"{}","body":"{}","group":"{}","level":"timeSensitive","sound":"{}","isArchive":"1""#,
-            bark_key,
-            title.replace('"', "\\\""),
-            body.replace('"', "\\\""),
-            group.replace('"', "\\\""),
-            sound,
-        );
+        let mut cmd = std::process::Command::new("bash");
+        cmd.arg(&script)
+            .arg("--title").arg(title)
+            .arg("--body").arg(body)
+            .arg("--group").arg(if notif.repo.is_empty() { "workforme" } else { &notif.repo })
+            .arg("--level").arg(if notif.is_failure { "failure" } else { "success" });
         if let Some(u) = &notif.url {
-            payload.push_str(&format!(r#","url":"{}""#, u.replace('"', "\\\"")));
+            cmd.arg("--url").arg(u);
         }
-        payload.push('}');
-        std::process::Command::new("curl")
-            .args(["-s", "-o", "/dev/null", "-X", "POST",
-                   "https://api.day.app/push",
-                   "-H", "Content-Type: application/json",
-                   "-d", &payload])
-            .spawn()
-            .ok();
+        cmd.spawn().ok();
     }
 }
 
