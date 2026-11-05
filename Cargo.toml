@@ -968,6 +968,10 @@ proc-macro2 = { opt-level = 3 }
 
 tree-sitter = { opt-level = 3 }
 taffy = { opt-level = 3 }
+gpui = { opt-level = 3 }
+gpui_macos = { opt-level = 3 }
+gpui_platform = { opt-level = 3 }
+gpui_wgpu = { opt-level = 3 }
 resvg = { opt-level = 3 }
 wasmtime = { opt-level = 3 }
 cranelift-codegen = { opt-level = 3 }
