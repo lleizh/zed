@@ -200,6 +200,7 @@ telemetry.workspace = true
 telemetry_events.workspace = true
 terminal_view.workspace = true
 my_tasks_panel.workspace = true
+workforme_log_panel.workspace = true
 workforme_panel.workspace = true
 theme.workspace = true
 theme_settings.workspace = true

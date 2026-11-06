@@ -22695,6 +22695,7 @@ dependencies = [
  "which_key",
  "windows 0.61.3",
  "windows_resources",
+ "workforme_log_panel",
  "workforme_panel",
  "workspace",
  "zed-reqwest",
@@ -22712,6 +22713,19 @@ dependencies = [
  "gpui",
  "serde_json",
  "ui",
+]
+
+[[package]]
+name = "workforme_log_panel"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "gpui",
+ "settings",
+ "shellexpand",
+ "ui",
+ "workforme_panel",
+ "workspace",
 ]
 
 [[package]]

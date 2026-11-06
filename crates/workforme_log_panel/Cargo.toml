@@ -1,0 +1,22 @@
+[package]
+name = "workforme_log_panel"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/workforme_log_panel.rs"
+doctest = false
+
+[dependencies]
+anyhow.workspace = true
+gpui.workspace = true
+shellexpand.workspace = true
+settings.workspace = true
+ui.workspace = true
+workforme_panel.workspace = true
+workspace.workspace = true

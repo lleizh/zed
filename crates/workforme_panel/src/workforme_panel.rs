@@ -56,8 +56,9 @@ actions!(workforme_panel, [ToggleFocus]);
 
 /// stage key → 表示ラベル
 fn tmux_session_exists(name: &str) -> bool {
+    let exact = format!("={}", name);
     std::process::Command::new("tmux")
-        .args(["has-session", "-t", name])
+        .args(["has-session", "-t", &exact])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
@@ -78,6 +79,8 @@ fn stage_label(key: &str) -> &str {
         "slack-summary" => "Slack",
         "slack-reply" => "Reply",
         "create-issue" => "Issue",
+        "invasion-buyer-e2e" => "E2E",
+        "invasion-buyer-setup" => "Setup",
         _ => key,
     }
 }
@@ -329,7 +332,7 @@ impl WorkformePanel {
                                     let dir = cwd.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| ".".to_string());
                                     let tmux_name = tmux.as_deref().unwrap_or(&sid);
                                     if tmux_session_exists(tmux_name) {
-                                        format!("tmux attach -t '{}'", tmux_name)
+                                        format!("tmux attach -t '={}'", tmux_name)
                                     } else {
                                         format!("codex resume --dangerously-bypass-approvals-and-sandbox -C '{}' {}", dir, sid)
                                     }
@@ -600,6 +603,37 @@ impl Render for WorkformePanel {
                     .child(
                         h_flex()
                             .gap_1()
+                            .child({
+                                let root = workforme_root.clone();
+                                let entity_cleanup = entity.clone();
+                                IconButton::new("wfm-cleanup-merged", IconName::Trash)
+                                    .icon_size(IconSize::Small)
+                                    .tooltip(Tooltip::text("Delete Merged Tasks"))
+                                    .on_click(move |_event, _window, cx| {
+                                        let root = root.clone();
+                                        let entity = entity_cleanup.clone();
+                                        if let Some(panel) = entity.upgrade() {
+                                            panel.update(cx, |panel, cx| {
+                                                for task in &panel.tasks {
+                                                    if task.task_type.as_deref() == Some("review")
+                                                        && task.inbox_item.as_ref().map(|i| i.status.as_str()) == Some("merged")
+                                                    {
+                                                        panel.deleting_ids.insert(task.id.clone());
+                                                    }
+                                                }
+                                                panel.tasks.retain(|t| {
+                                                    !(t.task_type.as_deref() == Some("review")
+                                                        && t.inbox_item.as_ref().map(|i| i.status.as_str()) == Some("merged"))
+                                                });
+                                                cx.notify();
+                                            });
+                                        }
+                                        std::process::Command::new("bash")
+                                            .arg(root.join("scripts/cleanup-merged.sh"))
+                                            .spawn()
+                                            .ok();
+                                    })
+                            })
                             .child(
                         IconButton::new("wfm-add-task", IconName::Plus)
                             .icon_size(IconSize::Small)
@@ -1026,17 +1060,18 @@ fn render_task_row(
                             h_flex()
                                 .gap_1()
                                 .items_center()
-                                .when_some(task.task_type.clone(), |el, task_type| {
+                                .when_some(task.pr_number, |el, n| {
                                     el.child(
-                                        div()
-                                            .px_1()
-                                            .rounded_sm()
-                                            .bg(cx.theme().colors().element_background)
-                                            .child(
-                                                Label::new(task_type)
-                                                    .size(ui::LabelSize::XSmall)
-                                                    .color(ui::Color::Muted),
-                                            ),
+                                        Label::new(format!("#{}", n))
+                                            .size(ui::LabelSize::XSmall)
+                                            .color(ui::Color::Muted),
+                                    )
+                                })
+                                .when_some(task.inbox_item.as_ref().and_then(|i| i.author.clone()), |el, author| {
+                                    el.child(
+                                        Label::new(author)
+                                            .size(ui::LabelSize::XSmall)
+                                            .color(ui::Color::Accent),
                                     )
                                 })
                                 .child(
@@ -1667,7 +1702,7 @@ impl WorkformeTaskView {
             Some("codex") => {
                 let tmux_name = tmux_session.unwrap_or(session_id);
                 if tmux_session_exists(tmux_name) {
-                    ("tmux", vec!["attach".to_string(), "-t".to_string(), tmux_name.to_string()])
+                    ("tmux", vec!["attach".to_string(), "-t".to_string(), format!("'={}'", tmux_name)])
                 } else {
                     let dir = self.repo_path().map(|p| p.display().to_string()).unwrap_or_else(|| ".".to_string());
                     ("codex", vec!["resume".to_string(), "--dangerously-bypass-approvals-and-sandbox".to_string(), "-C".to_string(), dir, session_id.to_string()])

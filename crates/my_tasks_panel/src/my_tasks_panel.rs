@@ -36,6 +36,7 @@ pub struct MyTasksPanel {
     running: std::collections::HashSet<String>,
     existing_urls: std::collections::HashSet<String>,
     collapsed_repos: std::collections::HashSet<String>,
+    author_filter: Option<String>,
     syncing: bool,
     updated_at: Option<String>,
     _workspace: WeakEntity<Workspace>,
@@ -50,6 +51,7 @@ impl MyTasksPanel {
             async move |this: WeakEntity<Self>, cx| {
                 let mut ticks_since_data_sync: u64 = 60; // 初回は即 sync
                 let mut ticks_since_summary_sync: u64 = 3600; // 初回は即 sync
+                let mut ticks_since_auto_review: u64 = 3600; // 初回は即実行
                 loop {
                     let workforme_root = {
                         let Ok(root) = this.update(cx, |_panel, cx| {
@@ -74,6 +76,11 @@ impl MyTasksPanel {
                                         .current_dir(&root)
                                         .output()
                                         .ok();
+                                    // inbox 更新直後に re_requested を検出して redo
+                                    std::process::Command::new(root.join("scripts/auto-rereview.sh"))
+                                        .current_dir(&root)
+                                        .spawn()
+                                        .ok();
                                 }
                             })
                             .await;
@@ -90,6 +97,23 @@ impl MyTasksPanel {
                                     std::process::Command::new(root.join("scripts/sync-inbox-summary.sh"))
                                         .current_dir(&root)
                                         .output()
+                                        .ok();
+                                }
+                            })
+                            .await;
+                    }
+
+                    // 1 時間ごとに auto-review.sh（review-requested PR を順次自動レビュー）
+                    ticks_since_auto_review += poll_secs;
+                    if ticks_since_auto_review >= 3600 {
+                        ticks_since_auto_review = 0;
+                        let root = workforme_root.clone();
+                        cx.background_executor()
+                            .spawn(async move {
+                                if is_working_hours() {
+                                    std::process::Command::new(root.join("scripts/auto-review.sh"))
+                                        .current_dir(&root)
+                                        .spawn()
                                         .ok();
                                 }
                             })
@@ -144,6 +168,7 @@ impl MyTasksPanel {
             running: std::collections::HashSet::new(),
             existing_urls: init_existing,
             collapsed_repos: std::collections::HashSet::new(),
+            author_filter: None,
             syncing: false,
             updated_at: init_updated_at,
             _workspace: workspace,
@@ -200,7 +225,29 @@ impl MyTasksPanel {
                 PanelTab::Mine => item.role == "assignee" || item.role == "reviewer" || item.role == "author" || item.role == "created",
                 PanelTab::Team => item.role == "team",
             })
+            .filter(|item| {
+                if let Some(ref filter) = self.author_filter {
+                    item.author.as_deref() == Some(filter.as_str())
+                } else {
+                    true
+                }
+            })
             .collect()
+    }
+
+    fn available_authors(&self, tab: PanelTab) -> Vec<String> {
+        let mut authors: Vec<String> = self.items
+            .iter()
+            .filter(|item| match tab {
+                PanelTab::Mine => item.role == "assignee" || item.role == "reviewer" || item.role == "author" || item.role == "created",
+                PanelTab::Team => item.role == "team",
+            })
+            .filter_map(|item| item.author.clone())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        authors.sort();
+        authors
     }
 
     fn render_item_list(
@@ -509,6 +556,7 @@ impl Panel for MyTasksPanel {
 impl Render for MyTasksPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let active_tab = self.active_tab;
+        let authors = self.available_authors(active_tab);
         let filtered = self.filtered_items(active_tab);
         let sections = self.render_item_list(filtered, match active_tab {
             PanelTab::Mine => "mytask",
@@ -522,6 +570,9 @@ impl Render for MyTasksPanel {
             PanelTab::Mine => "No assigned items",
             PanelTab::Team => "No review requests",
         };
+
+        let show_author_filter = authors.len() > 1;
+        let current_filter = self.author_filter.clone();
 
         div()
             .id("my-tasks-panel")
@@ -614,6 +665,22 @@ impl Render for MyTasksPanel {
                                     .color(ui::Color::Muted),
                             )
                             .child(
+                                IconButton::new("mytasks-auto-review", IconName::Sparkle)
+                                    .icon_size(IconSize::Small)
+                                    .tooltip(Tooltip::text("Run auto-review"))
+                                    .on_click({
+                                        move |_event, _window, cx| {
+                                            let s = WorkformePanelSettings::get_global(cx);
+                                            let root = PathBuf::from(
+                                                shellexpand::tilde(&s.workforme_root).to_string(),
+                                            );
+                                            std::process::Command::new(root.join("scripts/auto-review.sh"))
+                                                .spawn()
+                                                .ok();
+                                        }
+                                    }),
+                            )
+                            .child(
                                 IconButton::new("mytasks-refresh", IconName::ArrowCircle)
                                     .icon_size(IconSize::Small)
                                     .tooltip(Tooltip::text("Sync inbox"))
@@ -631,6 +698,73 @@ impl Render for MyTasksPanel {
                             ),
                     ),
             )
+            .when(show_author_filter, |el| {
+                let entity_for_filter = cx.entity().downgrade();
+                el.child(
+                    h_flex()
+                        .px_2()
+                        .py_1()
+                        .gap_1()
+                        .border_b_1()
+                        .border_color(cx.theme().colors().border)
+                        .flex_wrap()
+                        .child({
+                            let is_all = current_filter.is_none();
+                            let entity_c = entity_for_filter.clone();
+                            div()
+                                .id("author-filter-all")
+                                .cursor_pointer()
+                                .px_1()
+                                .rounded_md()
+                                .when(is_all, |el| el.bg(cx.theme().colors().ghost_element_selected))
+                                .when(!is_all, |el| el.hover(|s| s.bg(cx.theme().colors().ghost_element_hover)))
+                                .child(
+                                    Label::new("All")
+                                        .size(ui::LabelSize::XSmall)
+                                        .color(if is_all { ui::Color::Default } else { ui::Color::Muted }),
+                                )
+                                .on_click(move |_event, _window, cx| {
+                                    if let Some(panel) = entity_c.upgrade() {
+                                        panel.update(cx, |panel, cx| {
+                                            panel.author_filter = None;
+                                            cx.notify();
+                                        });
+                                    }
+                                })
+                        })
+                        .children(authors.iter().enumerate().map(|(idx, author)| {
+                            let is_selected = current_filter.as_deref() == Some(author.as_str());
+                            let author_clone = author.clone();
+                            let entity_c = entity_for_filter.clone();
+                            div()
+                                .id(gpui::ElementId::NamedInteger("author-filter".into(), idx as u64))
+                                .cursor_pointer()
+                                .px_1()
+                                .rounded_md()
+                                .when(is_selected, |el| el.bg(cx.theme().colors().ghost_element_selected))
+                                .when(!is_selected, |el| el.hover(|s| s.bg(cx.theme().colors().ghost_element_hover)))
+                                .child(
+                                    Label::new(author.clone())
+                                        .size(ui::LabelSize::XSmall)
+                                        .color(if is_selected { ui::Color::Default } else { ui::Color::Muted }),
+                                )
+                                .on_click(move |_event, _window, cx| {
+                                    if let Some(panel) = entity_c.upgrade() {
+                                        let author = author_clone.clone();
+                                        panel.update(cx, |panel, cx| {
+                                            if panel.author_filter.as_deref() == Some(author.as_str()) {
+                                                panel.author_filter = None;
+                                            } else {
+                                                panel.author_filter = Some(author);
+                                            }
+                                            cx.notify();
+                                        });
+                                    }
+                                })
+                                .into_any_element()
+                        })),
+                )
+            })
             .child(
                 div()
                     .id("mytasks-list")
