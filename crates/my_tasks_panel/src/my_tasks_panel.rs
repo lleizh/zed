@@ -81,6 +81,12 @@ impl MyTasksPanel {
                                         .current_dir(&root)
                                         .spawn()
                                         .ok();
+                                    // hotfix PR は即時レビュー
+                                    std::process::Command::new(root.join("scripts/auto-review.sh"))
+                                        .arg("--hotfix-only")
+                                        .current_dir(&root)
+                                        .spawn()
+                                        .ok();
                                 }
                             })
                             .await;
